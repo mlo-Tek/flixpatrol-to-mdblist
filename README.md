@@ -1,7 +1,7 @@
 # FlixPatrol → MDBList Sync
 
 Scrape today's top 10 from [FlixPatrol](https://flixpatrol.com) and sync them to [MDBList](https://mdblist.com) static lists.
-Runs as a Docker container with a **built-in scheduler** — no external cron needed.
+Runs as a Docker container with a **built-in scheduler** and a private FlareSolverr sidecar for Cloudflare-protected pages — no external cron needed.
 
 Inspired by [flixpatrol-top10-on-trakt](https://github.com/Navino16/flixpatrol-top10-on-trakt), but targeting MDBList instead of Trakt.
 
@@ -49,7 +49,7 @@ Edit `.env` and set your **MDBList API key** (get it at [mdblist.com/preferences
 MDBLIST_API_KEY=your_key_here
 ```
 
-Optionally customise the lists in `config/default.json` (a sensible default is generated on first run).
+Optionally customise the lists in `config/default.json`. If the mounted config directory is empty, the complete bundled default is copied there on first run; an existing file is never overwritten.
 
 ### 3. Run
 
@@ -71,13 +71,15 @@ That's it. The container will sync on startup and then again at the scheduled ti
 
 ### Environment Variables
 
-All variables are optional and override values in `config/default.json`.
+All variables except `MDBLIST_API_KEY` are optional and override values in `config/default.json`.
 
 | Variable | Description | Default |
 |---|---|---|
 | `MDBLIST_API_KEY` | Your MDBList API key | *(from config)* |
+| `FLARESOLVERR_URL` | FlareSolverr API URL | `http://flaresolverr:8191` |
+| `FLARESOLVERR_TIMEOUT` | Solver timeout in seconds | `60` |
 | `SCHEDULE` | Cron expression (5-field) | `0 6,18 * * *` |
-| `TZ` | Timezone | `Europe/Zurich` |
+| `TZ` | Timezone | `Europe/Berlin` |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR` | `INFO` |
 | `DRY_RUN` | `true` = log only, don't write | `false` |
 | `RUN_ONCE` | `true` = run once and exit | `false` |
@@ -103,25 +105,17 @@ All variables are optional and override values in `config/default.json`.
   "FlixPatrolTop10": [
     {
       "platform": "netflix",       // see supported platforms below
-      "location": "world",         // or a specific country
+      "location": "germany",       // German charts
       "fallback": false,           // fallback location if empty
       "limit": 10,                 // max items
-      "type": "movies",            // "movies", "shows", or "both"
-      "name": "Netflix Top 10 Movies",
+      "type": "movies",            // "movies", "shows", "both", or "overall"
+      "name": "Netflix Top 10 Movies Germany",
       "normalizeName": true,       // kebab-case the MDBList slug
       "kids": false                // Netflix Kids (needs specific country)
     }
   ],
 
-  // Popular lists (IMDB, Letterboxd, etc.)
-  "FlixPatrolPopular": [
-    {
-      "platform": "imdb",
-      "limit": 100,
-      "type": "both",
-      "name": "IMDB Popular"
-    }
-  ],
+  "FlixPatrolPopular": [],
 
   "MDBList": {
     "apiKey": "YOUR_MDBLIST_API_KEY_HERE"
@@ -139,6 +133,11 @@ All variables are optional and override values in `config/default.json`.
   }
 }
 ```
+
+The bundled `config/default.json` also includes WOW as separate movie/show lists and
+Crunchyroll as one mixed `overall` list. FlixPatrol currently publishes the
+German Crunchyroll ranking as “Overall (from Amazon Channels)”; each title is
+classified as a movie or show from the MDBList `any` search result before sync.
 
 ### Supported Platforms (72)
 
@@ -162,11 +161,12 @@ All variables are optional and override values in `config/default.json`.
                                                                  static lists
 ```
 
-1. **Scrape** FlixPatrol top-10 / popular pages
-2. **Match** each title to an IMDB/TMDB ID via MDBList search
-3. **Create** the list on MDBList if it doesn't exist
-4. **Sync** items (remove old, add new)
-5. **Sleep** until the next cron tick
+1. **Fetch** FlixPatrol pages through the FlareSolverr browser session
+2. **Scrape** the returned top-10 HTML
+3. **Match** each title to an IMDB/TMDB ID via MDBList search
+4. **Create** the list on MDBList if it doesn't exist
+5. **Sync** items (remove old, add new)
+6. **Sleep** until the next cron tick
 
 ---
 
@@ -189,7 +189,7 @@ docker compose run --rm -e DRY_RUN=true flixpatrol-mdblist
 ```bash
 pip install -r requirements.txt
 cd app
-MDBLIST_API_KEY=xxx python flixpatrol_to_mdblist.py
+FLARESOLVERR_URL=http://localhost:8191 MDBLIST_API_KEY=xxx python flixpatrol_to_mdblist.py
 ```
 
 ---
@@ -199,7 +199,8 @@ MDBLIST_API_KEY=xxx python flixpatrol_to_mdblist.py
 | Problem | Solution |
 |---|---|
 | `MDBList API key not set` | Set `MDBLIST_API_KEY` in `.env` or `config/default.json` |
-| `No items from FlixPatrol` | Platform/location combo may not exist on FlixPatrol |
+| `Cloudflare challenge detected` | Start FlareSolverr and check `FLARESOLVERR_URL` |
+| `No items from FlixPatrol` | Check the platform/location and FlareSolverr logs |
 | `title – not found` | Title couldn't be matched; FlixPatrol name ≠ MDBList/IMDB name |
 | `API limit reached` | Free MDBList = 1 000 req/day; reduce lists or upgrade |
 | Permission denied on config | `sudo chown -R 1000:1000 ./config` |

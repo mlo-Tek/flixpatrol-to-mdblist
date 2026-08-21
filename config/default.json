@@ -2,38 +2,137 @@
   "FlixPatrolTop10": [
     {
       "platform": "netflix",
-      "location": "world",
+      "location": "germany",
       "fallback": false,
       "limit": 10,
       "type": "movies",
-      "name": "Netflix Top 10 Movies",
+      "name": "Netflix Top 10 Movies Germany",
       "normalizeName": true
     },
     {
       "platform": "netflix",
-      "location": "world",
+      "location": "germany",
       "fallback": false,
       "limit": 10,
       "type": "shows",
-      "name": "Netflix Top 10 Shows",
-      "normalizeName": true
-    },
-    {
-      "platform": "disney",
-      "location": "world",
-      "fallback": false,
-      "limit": 10,
-      "type": "both",
-      "name": "Disney Plus Top 10",
+      "name": "Netflix Top 10 Shows Germany",
       "normalizeName": true
     },
     {
       "platform": "amazon-prime",
-      "location": "world",
+      "location": "germany",
       "fallback": false,
       "limit": 10,
-      "type": "both",
-      "name": "Amazon Prime Top 10",
+      "type": "movies",
+      "name": "Amazon Prime Top 10 Movies Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "amazon-prime",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "Amazon Prime Top 10 Shows Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "disney",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "movies",
+      "name": "Disney Plus Top 10 Movies Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "disney",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "Disney Plus Top 10 Shows Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "hbo-max",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "movies",
+      "name": "HBO Max Top 10 Movies Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "hbo-max",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "HBO Max Top 10 Shows Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "apple-tv",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "movies",
+      "name": "Apple TV Top 10 Movies Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "apple-tv",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "Apple TV Top 10 Shows Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "paramount-plus",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "movies",
+      "name": "Paramount Plus Top 10 Movies Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "paramount-plus",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "Paramount Plus Top 10 Shows Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "wow",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "movies",
+      "name": "WOW Top 10 Movies Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "wow",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "WOW Top 10 Shows Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "crunchyroll",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "overall",
+      "name": "Crunchyroll Top 10 Overall Germany",
       "normalizeName": true
     }
   ],

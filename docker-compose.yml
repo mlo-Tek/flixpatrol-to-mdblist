@@ -1,8 +1,10 @@
 services:
   flixpatrol-mdblist:
-    image: ghcr.io/dm2602/flixpatrol-to-mdblist:latest
+    image: ghcr.io/matschi95/flixpatrol-to-mdblist:latest
     container_name: flixpatrol-mdblist
     restart: unless-stopped
+    depends_on:
+      - flaresolverr
 
     # ── Config volume ──────────────────────────────────────────
     # First run creates config/default.json – edit it, then restart.
@@ -12,9 +14,12 @@ services:
     # ── Environment variables ──────────────────────────────────
     # All optional – they override values in config/default.json.
     environment:
-      # Your MDBList API key (get it at https://mdblist.com/preferences/)
-      # Can also be set inside config/default.json instead.
+      # Your MDBList API key (get it at https://mdblist.com/preferences/).
       - MDBLIST_API_KEY=${MDBLIST_API_KEY:-}
+
+      # Internal Cloudflare solver sidecar. Do not expose its port publicly.
+      - FLARESOLVERR_URL=${FLARESOLVERR_URL:-http://flaresolverr:8191}
+      - FLARESOLVERR_TIMEOUT=${FLARESOLVERR_TIMEOUT:-60}
 
       # Cron schedule (5-field). Default: twice daily at 06:00 and 18:00.
       # FlixPatrol updates once a day, so more often is wasteful.
@@ -35,4 +40,12 @@ services:
       - RUN_ONCE=${RUN_ONCE:-false}
 
       # Timezone for the scheduler (optional)
-      - TZ=${TZ:-Europe/Zurich}
+      - TZ=${TZ:-Europe/Berlin}
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=${FLARESOLVERR_LOG_LEVEL:-info}
+      - TZ=${TZ:-Europe/Berlin}

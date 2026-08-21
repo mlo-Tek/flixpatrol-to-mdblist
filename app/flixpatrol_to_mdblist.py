@@ -16,6 +16,8 @@ import signal
 import sys
 import time
 import hashlib
+import unicodedata
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -37,10 +39,16 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/125.0.0.0 Safari/537.36"
 )
+FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL", "").strip().rstrip("/")
+FLARESOLVERR_TIMEOUT = int(os.environ.get("FLARESOLVERR_TIMEOUT", "60"))
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/app/config"))
 CONFIG_FILE = CONFIG_DIR / "default.json"
+BUNDLED_CONFIG_FILE = Path(
+    os.environ.get("BUNDLED_CONFIG_FILE", str(SCRIPT_DIR / "default.json"))
+)
 
 TOP10_PLATFORMS = [
     "9now", "abema", "amazon", "amazon-channels", "amazon-prime", "amc-plus",
@@ -63,26 +71,7 @@ POPULAR_PLATFORMS = [
 ]
 
 DEFAULT_CONFIG = {
-    "FlixPatrolTop10": [
-        {
-            "platform": "netflix",
-            "location": "world",
-            "fallback": False,
-            "limit": 10,
-            "type": "movies",
-            "name": "Netflix Top 10 Movies",
-            "normalizeName": True,
-        },
-        {
-            "platform": "netflix",
-            "location": "world",
-            "fallback": False,
-            "limit": 10,
-            "type": "shows",
-            "name": "Netflix Top 10 Shows",
-            "normalizeName": True,
-        },
-    ],
+    "FlixPatrolTop10": [],
     "FlixPatrolPopular": [],
     "MDBList": {
         "apiKey": "YOUR_MDBLIST_API_KEY_HERE",
@@ -110,6 +99,17 @@ logging.basicConfig(
 logger = logging.getLogger("flixpatrol-mdblist")
 
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+
+
+def _clean_search_query(query: str) -> str:
+    """Normalize titles and strip invisible Unicode formatting characters."""
+    normalized = unicodedata.normalize("NFKC", query or "")
+    visible = "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) != "Cf"
+    )
+    return re.sub(r"\s+", " ", visible).strip()
 
 # ---------------------------------------------------------------------------
 # File cache
@@ -181,19 +181,154 @@ class FileCache:
 # the first <table> that follows it.
 
 
+class FlareSolverrError(RuntimeError):
+    """Raised when FlareSolverr cannot return a usable target page."""
+
+
+def _is_cloudflare_challenge(html: str, headers: Optional[dict] = None) -> bool:
+    """Detect common Cloudflare interstitials before they reach the parser."""
+    normalized_headers = {
+        str(key).lower(): str(value).lower()
+        for key, value in (headers or {}).items()
+    }
+    if normalized_headers.get("cf-mitigated") == "challenge":
+        return True
+
+    body = (html or "").lower()
+    return any(marker in body for marker in (
+        "<title>just a moment",
+        "<title>checking your browser",
+        "<title></title>",
+    ))
+
+
+class FlareSolverrClient:
+    """Small client for the FlareSolverr-compatible HTTP API."""
+
+    def __init__(self, base_url: str, max_timeout: int = 60):
+        self.base_url = base_url.rstrip("/")
+        self.endpoint = f"{self.base_url}/v1"
+        self.max_timeout_ms = max_timeout * 1000
+        self.http = requests.Session()
+        self.session_id = f"flixpatrol-mdblist-{uuid.uuid4().hex}"
+        self.started = False
+
+    def _command(self, payload: dict) -> dict:
+        response = self.http.post(
+            self.endpoint,
+            json=payload,
+            timeout=(10, (self.max_timeout_ms / 1000) + 10),
+        )
+        response.raise_for_status()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise FlareSolverrError("FlareSolverr returned invalid JSON") from exc
+
+        if not isinstance(data, dict):
+            raise FlareSolverrError("FlareSolverr returned an invalid response")
+
+        if data.get("status") != "ok":
+            message = data.get("message") or data.get("status") or "unknown error"
+            raise FlareSolverrError(f"FlareSolverr error: {message}")
+        return data
+
+    def start(self):
+        if self.started:
+            return
+        logger.info(f"Starting FlareSolverr session via {self.base_url}")
+        for attempt in range(1, 6):
+            try:
+                self._command({
+                    "cmd": "sessions.create",
+                    "session": self.session_id,
+                })
+                self.started = True
+                return
+            except (requests.RequestException, FlareSolverrError) as exc:
+                if attempt == 5:
+                    raise
+                delay = min(2 ** attempt, 10)
+                logger.warning(
+                    f"FlareSolverr not ready ({exc}); retrying in {delay}s"
+                )
+                time.sleep(delay)
+
+    def fetch(self, url: str) -> str:
+        self.start()
+        logger.debug(f"FlareSolverr GET {url}")
+        data = self._command({
+            "cmd": "request.get",
+            "url": url,
+            "session": self.session_id,
+            "session_ttl_minutes": 10,
+            "maxTimeout": self.max_timeout_ms,
+        })
+        solution = data.get("solution") or {}
+        html = solution.get("response")
+        try:
+            status = int(solution.get("status") or 0)
+        except (TypeError, ValueError):
+            status = 0
+
+        if status >= 400:
+            raise FlareSolverrError(
+                f"FlareSolverr upstream returned HTTP {status} for {url}"
+            )
+        if not isinstance(html, str) or not html.strip():
+            raise FlareSolverrError(
+                f"FlareSolverr returned an empty response for {url}"
+            )
+        if _is_cloudflare_challenge(html, solution.get("headers")):
+            raise FlareSolverrError(
+                f"Cloudflare challenge was not solved for {url}"
+            )
+        return html
+
+    def close(self):
+        if not self.started:
+            self.http.close()
+            return
+        try:
+            self._command({"cmd": "sessions.destroy", "session": self.session_id})
+            logger.debug("FlareSolverr session closed")
+        except (requests.RequestException, FlareSolverrError) as exc:
+            logger.warning(f"Could not close FlareSolverr session: {exc}")
+        finally:
+            self.started = False
+            self.http.close()
+
+
 class FlixPatrolScraper:
     def __init__(self, cache: FileCache):
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": USER_AGENT})
         self.cache = cache
+        self.solver = (
+            FlareSolverrClient(FLARESOLVERR_URL, FLARESOLVERR_TIMEOUT)
+            if FLARESOLVERR_URL else None
+        )
+
+    def close(self):
+        if self.solver:
+            self.solver.close()
+        self.session.close()
 
     def _get(self, url: str) -> Optional[BeautifulSoup]:
         logger.debug(f"GET {url}")
         try:
-            r = self.session.get(url, timeout=30)
-            r.raise_for_status()
-            return BeautifulSoup(r.text, "html.parser")
-        except requests.RequestException as e:
+            if self.solver:
+                html = self.solver.fetch(url)
+            else:
+                r = self.session.get(url, timeout=30)
+                if _is_cloudflare_challenge(r.text, r.headers):
+                    raise FlareSolverrError(
+                        "Cloudflare challenge detected; configure FLARESOLVERR_URL"
+                    )
+                r.raise_for_status()
+                html = r.text
+            return BeautifulSoup(html, "html.parser")
+        except (requests.RequestException, FlareSolverrError) as e:
             logger.error(f"HTTP error for {url}: {e}")
             return None
 
@@ -202,46 +337,55 @@ class FlixPatrolScraper:
     def get_top10(self, platform: str, location: str, media_type: str = "both",
                   limit: int = 10, fallback=False, kids: bool = False) -> list[dict]:
         """
-        Fetch a top-10 list. media_type is "movies", "shows", or "both".
+        Fetch a top-10 list. media_type is "movies", "shows", "both", or
+        "overall". Overall lists can contain both movies and shows.
         Returns list of dicts: {title, url, type, rank}
         """
         url = f"{FLIXPATROL_BASE}/top10/{platform}/{location}"
 
-        # Cache the full page HTML to avoid re-fetching for movies+shows
+        # Cache only validated ranking HTML, never an error/challenge page.
         cache_key = f"fp:page:{platform}:{location}"
         cached_html = self.cache.get(cache_key)
+        fetched = False
         if cached_html is not None:
             soup = BeautifulSoup(cached_html, "html.parser")
         else:
             soup = self._get(url)
-            if soup:
-                self.cache.set(cache_key, str(soup))
+            fetched = soup is not None
 
         if not soup and fallback and fallback != location:
             logger.info(f"No page for {platform}/{location}, fallback → {fallback}")
             url = f"{FLIXPATROL_BASE}/top10/{platform}/{fallback}"
             soup = self._get(url)
+            fetched = False
 
         if not soup:
             return []
 
         sections = self._parse_sections(soup)
+        if fetched and sections:
+            self.cache.set(cache_key, str(soup))
         results = []
 
         for mtype in _split_types(media_type):
             section_key = (mtype, kids)
-            items = sections.get(section_key, [])
-            item_type = "movie" if mtype == "movies" else "show"
+            items = sections.get(section_key, [])[:limit]
+            item_type = {
+                "movies": "movie",
+                "shows": "show",
+                "overall": "overall",
+            }[mtype]
             for item in items:
                 item["type"] = item_type
             results.extend(items)
 
-        return results[:limit]
+        return results
 
     def _parse_sections(self, soup: BeautifulSoup) -> dict:
         """
         Parse the page into sections keyed by (type, kids).
-        Returns: {("movies", False): [...], ("shows", False): [...], ...}
+        Returns: {("movies", False): [...], ("shows", False): [...],
+                  ("overall", False): [...], ...}
         """
         sections = {}
         headings = soup.find_all(["h2", "h3"])
@@ -284,6 +428,8 @@ class FlixPatrolScraper:
             return ("shows", is_kids)
         if "movie" in text:
             return ("movies", is_kids)
+        if "overall" in text:
+            return ("overall", is_kids)
 
         return None
 
@@ -458,6 +604,8 @@ def _split_types(media_type: str) -> list[str]:
         return ["movies"]
     if media_type == "shows":
         return ["shows"]
+    if media_type == "overall":
+        return ["overall"]
     return ["movies", "shows"]
 
 
@@ -490,10 +638,22 @@ class MDBListClient:
                 return data
             return None
         except requests.RequestException as e:
-            logger.error(f"MDBList API error ({method} {path}): {e}")
-            if hasattr(e, "response") and e.response is not None:
-                # Log error response body on ERROR level so it's always visible
-                logger.error(f"  Response body: {e.response.text[:500]}")
+            response = getattr(e, "response", None)
+            if response is not None:
+                logger.error(
+                    f"MDBList API error ({method} {path}): "
+                    f"HTTP {response.status_code}"
+                )
+                body = response.text[:500]
+                if self.api_key:
+                    body = body.replace(self.api_key, "[REDACTED]")
+                if body:
+                    logger.error(f"  Response body: {body}")
+            else:
+                logger.error(
+                    f"MDBList API error ({method} {path}): "
+                    f"{type(e).__name__}"
+                )
             return None
 
     def get_limits(self) -> Optional[dict]:
@@ -542,7 +702,7 @@ class MDBListClient:
         API docs: GET /search/{media_type}?query=...&year=...
         """
         type_slug = {"movie": "movie", "show": "show"}.get(media_type, "any")
-        params = {"query": query}
+        params = {"query": _clean_search_query(query)}
         if year:
             params["year"] = year
         r = self._req("GET", f"/search/{type_slug}", params=params)
@@ -630,8 +790,9 @@ class TitleMatcher:
     Resolves FlixPatrol titles to IMDB/TMDB IDs.
 
     Strategy (in order):
-      1. Use IMDB ID directly from the FlixPatrol title page (most reliable)
-      2. Search TMDB by title+year (requires TMDB_API_KEY env var)
+      1. Use IMDB ID directly from regular FlixPatrol title pages
+      2. Search MDBList by title and year (or type `any` for Overall charts)
+      3. Search TMDB by title+year (requires TMDB_API_KEY env var)
     """
 
     def __init__(self, mdblist: MDBListClient, cache: FileCache,
@@ -645,17 +806,18 @@ class TitleMatcher:
         fp_imdb = title_info.get("imdb_id")
 
         # --- Strategy 1: IMDB ID from FlixPatrol page ---
-        if fp_imdb:
+        if fp_imdb and media_type != "overall":
             return {"imdb_id": fp_imdb, "title": title, "year": year,
                     "_src": "FlixPatrol"}
 
         # --- Check cache ---
-        cache_key = f"match:v4:{title}:{year}:{media_type}"
+        cache_key = f"match:v5:{title}:{year}:{media_type}"
         cached = self.cache.get(cache_key)
         if cached is not None:
             return cached if cached != "_MISS_" else None
 
-        mtype = "movie" if media_type == "movie" else "show"
+        mtype = ("any" if media_type == "overall" else
+                 "movie" if media_type == "movie" else "show")
         best = None
 
         # --- Strategy 2: MDBList search (has IMDB IDs) ---
@@ -672,14 +834,19 @@ class TitleMatcher:
 
         # --- Strategy 3: TMDB search (fallback) ---
         if not best and self.tmdb and self.tmdb.available:
-            if year:
-                results = self.tmdb.search(title, mtype, year)
-                best = self._pick(results, title, year)
-            if not best:
-                results = self.tmdb.search(title, mtype)
-                best = self._pick(results, title, year)
-            if best:
-                best["_src"] = "TMDB"
+            tmdb_types = (("movie", "show") if media_type == "overall"
+                          else (mtype,))
+            for candidate_type in tmdb_types:
+                if year:
+                    results = self.tmdb.search(title, candidate_type, year)
+                    best = self._pick(results, title, year)
+                if not best:
+                    results = self.tmdb.search(title, candidate_type)
+                    best = self._pick(results, title, year)
+                if best:
+                    best["_media_type"] = candidate_type
+                    best["_src"] = "TMDB"
+                    break
 
         if best:
             self.cache.set(cache_key, best)
@@ -702,7 +869,7 @@ class TitleMatcher:
         if year:
             for item in results:
                 it = self._norm(item.get("title", ""))
-                iy = item.get("year")
+                iy = item.get("year") or item.get("release_year")
                 if it == tl and iy and iy == year:
                     r = self._extract_ids(item)
                     if r:
@@ -712,7 +879,7 @@ class TitleMatcher:
         if year:
             for item in results:
                 it = self._norm(item.get("title", ""))
-                iy = item.get("year")
+                iy = item.get("year") or item.get("release_year")
                 if it == tl and iy and abs(iy - year) == 1:
                     r = self._extract_ids(item)
                     if r:
@@ -721,7 +888,7 @@ class TitleMatcher:
         # Pass 3: exact title, no year info available on either side
         for item in results:
             it = self._norm(item.get("title", ""))
-            iy = item.get("year")
+            iy = item.get("year") or item.get("release_year")
             if it == tl and (year is None or iy is None):
                 r = self._extract_ids(item)
                 if r:
@@ -744,7 +911,18 @@ class TitleMatcher:
         if not imdb and not tmdb:
             return None
 
-        r = {"title": item.get("title", ""), "year": item.get("year")}
+        r = {
+            "title": item.get("title", ""),
+            "year": item.get("year") or item.get("release_year"),
+        }
+        raw_type = str(
+            item.get("mediatype") or item.get("media_type") or
+            item.get("type") or ""
+        ).lower()
+        if raw_type in ("movie", "film"):
+            r["_media_type"] = "movie"
+        elif raw_type in ("show", "tv", "tvshow", "tvseries", "series"):
+            r["_media_type"] = "show"
         if imdb:
             r["imdb_id"] = str(imdb)
         if tmdb:
@@ -881,8 +1059,13 @@ def _entry(item: dict) -> Optional[dict]:
 def load_config() -> dict:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if not CONFIG_FILE.exists():
-        logger.info(f"Writing default config to {CONFIG_FILE}")
-        CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=2))
+        if BUNDLED_CONFIG_FILE.exists():
+            logger.info(f"Installing bundled config to {CONFIG_FILE}")
+            bundled_config = json.loads(BUNDLED_CONFIG_FILE.read_text())
+            CONFIG_FILE.write_text(json.dumps(bundled_config, indent=2) + "\n")
+        else:
+            logger.info(f"Writing minimal default config to {CONFIG_FILE}")
+            CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=2) + "\n")
         logger.info("Edit config/default.json and restart the container.")
         sys.exit(0)
 
@@ -931,78 +1114,81 @@ def run_sync(cfg: dict):
 
     mdb = MDBListClient(cfg["MDBList"]["apiKey"])
     scraper = FlixPatrolScraper(cache)
+    try:
+        # TMDB fallback search (optional, set TMDB_API_KEY env var)
+        tmdb_key = os.environ.get("TMDB_API_KEY", "")
+        tmdb = TMDBClient(tmdb_key) if tmdb_key else None
+        if tmdb and tmdb.available:
+            logger.info("TMDB fallback search: enabled")
+        else:
+            logger.info("TMDB fallback search: disabled (set TMDB_API_KEY to enable)")
 
-    # TMDB fallback search (optional, set TMDB_API_KEY env var)
-    tmdb_key = os.environ.get("TMDB_API_KEY", "")
-    tmdb = TMDBClient(tmdb_key) if tmdb_key else None
-    if tmdb and tmdb.available:
-        logger.info("TMDB fallback search: enabled")
-    else:
-        logger.info("TMDB fallback search: disabled (set TMDB_API_KEY to enable)")
+        matcher = TitleMatcher(mdb, cache, tmdb)
 
-    matcher = TitleMatcher(mdb, cache, tmdb)
+        limits = mdb.get_limits()
+        if limits:
+            logger.info(
+                f"MDBList API: {limits.get('api_requests_count', 0)}/"
+                f"{limits.get('api_requests', 1000)} requests used"
+            )
 
-    limits = mdb.get_limits()
-    if limits:
-        logger.info(
-            f"MDBList API: {limits.get('api_requests_count', 0)}/"
-            f"{limits.get('api_requests', 1000)} requests used"
-        )
+        # --- Top 10 ---
+        for t10 in cfg.get("FlixPatrolTop10", []):
+            name = t10.get("name") or make_top10_name(t10)
+            slug = slugify(name) if t10.get("normalizeName", True) else name
+            kids = t10.get("kids", False)
+            logger.info(f"\n▶ Top10: {name}")
+            logger.info(f"  {t10.get('platform')}/{t10.get('location')} "
+                         f"type={t10.get('type', 'both')} limit={t10.get('limit', 10)}"
+                         f"{' kids=true' if kids else ''}")
 
-    # --- Top 10 ---
-    for t10 in cfg.get("FlixPatrolTop10", []):
-        name = t10.get("name") or make_top10_name(t10)
-        slug = slugify(name) if t10.get("normalizeName", True) else name
-        kids = t10.get("kids", False)
-        logger.info(f"\n▶ Top10: {name}")
-        logger.info(f"  {t10.get('platform')}/{t10.get('location')} "
-                     f"type={t10.get('type', 'both')} limit={t10.get('limit', 10)}"
-                     f"{' kids=true' if kids else ''}")
+            fp = scraper.get_top10(
+                t10["platform"], t10.get("location", "world"),
+                t10.get("type", "both"), t10.get("limit", 10),
+                t10.get("fallback", False), kids,
+            )
+            if not fp:
+                logger.warning("  No items from FlixPatrol")
+                continue
+            logger.info(f"  FlixPatrol returned {len(fp)} items")
 
-        fp = scraper.get_top10(
-            t10["platform"], t10.get("location", "world"),
-            t10.get("type", "both"), t10.get("limit", 10),
-            t10.get("fallback", False), kids,
-        )
-        if not fp:
-            logger.warning("  No items from FlixPatrol")
-            continue
-        logger.info(f"  FlixPatrol returned {len(fp)} items")
+            matched = _match_all(fp, scraper, matcher)
+            if not matched:
+                logger.warning("  No items matched")
+                continue
 
-        matched = _match_all(fp, scraper, matcher)
-        if not matched:
-            logger.warning("  No items matched")
-            continue
+            lid = find_or_create_list(mdb, name, slug)
+            if lid is not None:
+                sync_items(mdb, lid, matched, name)
+            elif DRY_RUN:
+                sync_items(mdb, 0, matched, name)
 
-        lid = find_or_create_list(mdb, name, slug)
-        if lid is not None:
-            sync_items(mdb, lid, matched, name)
-        elif DRY_RUN:
-            sync_items(mdb, 0, matched, name)
+        # --- Popular ---
+        for pop in cfg.get("FlixPatrolPopular", []):
+            name = pop.get("name") or make_popular_name(pop)
+            slug = slugify(name) if pop.get("normalizeName", True) else name
+            logger.info(f"\n▶ Popular: {name}")
 
-    # --- Popular ---
-    for pop in cfg.get("FlixPatrolPopular", []):
-        name = pop.get("name") or make_popular_name(pop)
-        slug = slugify(name) if pop.get("normalizeName", True) else name
-        logger.info(f"\n▶ Popular: {name}")
+            fp = scraper.get_popular(
+                pop["platform"], pop.get("type", "both"), pop.get("limit", 100),
+            )
+            if not fp:
+                logger.warning("  No items from FlixPatrol")
+                continue
+            logger.info(f"  FlixPatrol returned {len(fp)} items")
 
-        fp = scraper.get_popular(
-            pop["platform"], pop.get("type", "both"), pop.get("limit", 100),
-        )
-        if not fp:
-            logger.warning("  No items from FlixPatrol")
-            continue
-        logger.info(f"  FlixPatrol returned {len(fp)} items")
+            matched = _match_all(fp, scraper, matcher)
+            if not matched:
+                continue
 
-        matched = _match_all(fp, scraper, matcher)
-        if not matched:
-            continue
+            lid = find_or_create_list(mdb, name, slug)
+            if lid is not None:
+                sync_items(mdb, lid, matched, name)
+            elif DRY_RUN:
+                sync_items(mdb, 0, matched, name)
 
-        lid = find_or_create_list(mdb, name, slug)
-        if lid is not None:
-            sync_items(mdb, lid, matched, name)
-        elif DRY_RUN:
-            sync_items(mdb, 0, matched, name)
+    finally:
+        scraper.close()
 
     elapsed = time.time() - start
     logger.info(f"\n{'=' * 55}")
@@ -1015,11 +1201,21 @@ def _match_all(fp_items: list, scraper: FlixPatrolScraper,
     matched = []
     for item in fp_items:
         title_info = scraper.get_title_info(item["url"]) if item.get("url") else {}
-        media_type = item.get("type", "movie")
+        configured_type = item.get("type", "movie")
         fp_year = title_info.get("year")
 
-        ids = matcher.find(item["title"], title_info, media_type)
+        ids = matcher.find(item["title"], title_info, configured_type)
         if ids and (ids.get("imdb_id") or ids.get("tmdb_id")):
+            detected_type = ids.pop("_media_type", None)
+            media_type = configured_type
+            if configured_type == "overall":
+                media_type = detected_type
+                if media_type not in ("movie", "show"):
+                    media_type = "show"
+                    logger.warning(
+                        f"  MDBList returned no media type for '{item['title']}'; "
+                        "assuming TV show"
+                    )
             ids["type"] = media_type
             matched.append(ids)
             id_str = ids.get("imdb_id") or f"tmdb:{ids.get('tmdb_id')}"
@@ -1041,7 +1237,7 @@ def _match_all(fp_items: list, scraper: FlixPatrolScraper,
 
 def main():
     logger.info("╔═══════════════════════════════════════════════════════╗")
-    logger.info("║       FlixPatrol → MDBList Sync  v1.1.0             ║")
+    logger.info("║       FlixPatrol → MDBList Sync  v1.2.0             ║")
     logger.info("╚═══════════════════════════════════════════════════════╝")
 
     cfg = load_config()

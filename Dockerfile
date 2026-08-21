@@ -19,6 +19,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application
 COPY app/ .
 
+# Keep the complete default config outside the mounted /app/config directory.
+# The application installs it when the config volume is empty.
+COPY config/default.json /app/default.json
+
 # Config volume
 VOLUME /app/config
 
