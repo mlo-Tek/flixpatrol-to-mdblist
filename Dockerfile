@@ -19,6 +19,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application
 COPY app/ .
 
+# Fail the image build early if the fork-specific Python files contain syntax errors.
+RUN python -m py_compile flixpatrol_to_mdblist.py mlo_patches.py mlo_entrypoint.py
+
 # Keep the complete default config outside the mounted /app/config directory.
 # The application installs it when the config volume is empty.
 COPY config/default.json /app/default.json
@@ -35,4 +38,4 @@ USER appuser
 HEALTHCHECK --interval=60s --timeout=5s --retries=3 \
     CMD python -c "import os, signal; os.kill(1, 0)" || exit 1
 
-ENTRYPOINT ["python", "flixpatrol_to_mdblist.py"]
+ENTRYPOINT ["python", "mlo_entrypoint.py"]
