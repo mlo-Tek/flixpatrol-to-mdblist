@@ -7,7 +7,8 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 import flixpatrol_to_mdblist as sync
-from mlo_patches import install
+from mlo_list_layout import install as install_list_layout
+from mlo_patches import install as install_patches
 
 
 def enable_persistent_file_logging() -> Path:
@@ -43,6 +44,7 @@ def enable_persistent_file_logging() -> Path:
 
 if __name__ == "__main__":
     log_file = enable_persistent_file_logging()
-    install(sync)
+    install_patches(sync)
+    install_list_layout(sync)
     sync.logger.info("Persistent log file: %s", log_file)
     sync.main()
