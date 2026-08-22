@@ -1,30 +1,13 @@
 {
   "FlixPatrolTop10": [
     {
-      "platform": "netflix",
-      "location": "germany",
-      "fallback": false,
-      "limit": 10,
-      "type": "movies",
-      "name": "Netflix Top 10 Movies Germany",
-      "normalizeName": true
-    },
-    {
-      "platform": "netflix",
-      "location": "germany",
-      "fallback": false,
-      "limit": 10,
-      "type": "shows",
-      "name": "Netflix Top 10 Shows Germany",
-      "normalizeName": true
-    },
-    {
       "platform": "amazon-prime",
       "location": "germany",
       "fallback": false,
       "limit": 10,
       "type": "movies",
-      "name": "Amazon Prime Top 10 Movies Germany",
+      "name": "Top 10 Amazon Prime Movies Today",
+      "description": "Top 10 Amazon Prime movies in Germany",
       "normalizeName": true
     },
     {
@@ -33,43 +16,8 @@
       "fallback": false,
       "limit": 10,
       "type": "shows",
-      "name": "Amazon Prime Top 10 Shows Germany",
-      "normalizeName": true
-    },
-    {
-      "platform": "disney",
-      "location": "germany",
-      "fallback": false,
-      "limit": 10,
-      "type": "movies",
-      "name": "Disney Plus Top 10 Movies Germany",
-      "normalizeName": true
-    },
-    {
-      "platform": "disney",
-      "location": "germany",
-      "fallback": false,
-      "limit": 10,
-      "type": "shows",
-      "name": "Disney Plus Top 10 Shows Germany",
-      "normalizeName": true
-    },
-    {
-      "platform": "hbo-max",
-      "location": "germany",
-      "fallback": false,
-      "limit": 10,
-      "type": "movies",
-      "name": "HBO Max Top 10 Movies Germany",
-      "normalizeName": true
-    },
-    {
-      "platform": "hbo-max",
-      "location": "germany",
-      "fallback": false,
-      "limit": 10,
-      "type": "shows",
-      "name": "HBO Max Top 10 Shows Germany",
+      "name": "Top 10 Amazon Prime TV Shows Today",
+      "description": "Top 10 Amazon Prime TV shows in Germany",
       "normalizeName": true
     },
     {
@@ -78,7 +26,8 @@
       "fallback": false,
       "limit": 10,
       "type": "movies",
-      "name": "Apple TV Top 10 Movies Germany",
+      "name": "Top 10 Apple TV+ Movies Today",
+      "description": "Top 10 Apple TV+ movies in Germany",
       "normalizeName": true
     },
     {
@@ -87,43 +36,8 @@
       "fallback": false,
       "limit": 10,
       "type": "shows",
-      "name": "Apple TV Top 10 Shows Germany",
-      "normalizeName": true
-    },
-    {
-      "platform": "paramount-plus",
-      "location": "germany",
-      "fallback": false,
-      "limit": 10,
-      "type": "movies",
-      "name": "Paramount Plus Top 10 Movies Germany",
-      "normalizeName": true
-    },
-    {
-      "platform": "paramount-plus",
-      "location": "germany",
-      "fallback": false,
-      "limit": 10,
-      "type": "shows",
-      "name": "Paramount Plus Top 10 Shows Germany",
-      "normalizeName": true
-    },
-    {
-      "platform": "wow",
-      "location": "germany",
-      "fallback": false,
-      "limit": 10,
-      "type": "movies",
-      "name": "WOW Top 10 Movies Germany",
-      "normalizeName": true
-    },
-    {
-      "platform": "wow",
-      "location": "germany",
-      "fallback": false,
-      "limit": 10,
-      "type": "shows",
-      "name": "WOW Top 10 Shows Germany",
+      "name": "Top 10 Apple TV+ TV Shows Today",
+      "description": "Top 10 Apple TV+ TV shows in Germany",
       "normalizeName": true
     },
     {
@@ -132,7 +46,188 @@
       "fallback": false,
       "limit": 10,
       "type": "overall",
-      "name": "Crunchyroll Top 10 Overall Germany",
+      "name": "Top 10 Crunchyroll Today",
+      "description": "Top 10 Crunchyroll titles in Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "disney",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "movies",
+      "name": "Top 10 Disney+ Movies Today",
+      "description": "Top 10 Disney+ movies in Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "disney",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "Top 10 Disney+ TV Shows Today",
+      "description": "Top 10 Disney+ TV shows in Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "hbo-max",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "movies",
+      "name": "Top 10 HBO Max Movies Today",
+      "description": "Top 10 HBO Max movies in Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "hbo-max",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "Top 10 HBO Max TV Shows Today",
+      "description": "Top 10 HBO Max TV shows in Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "hulu",
+      "location": "united-states",
+      "fallback": false,
+      "limit": 10,
+      "type": "movies",
+      "name": "Top 10 Hulu Movies Today",
+      "description": "Top 10 Hulu movies in United States",
+      "normalizeName": true
+    },
+    {
+      "platform": "hulu",
+      "location": "united-states",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "Top 10 Hulu TV Shows Today",
+      "description": "Top 10 Hulu TV shows in United States",
+      "normalizeName": true
+    },
+    {
+      "platform": "joyn",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "movies",
+      "name": "Top 10 Joyn Movies Today",
+      "description": "Top 10 Joyn movies in Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "joyn",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "Top 10 Joyn TV Shows Today",
+      "description": "Top 10 Joyn TV shows in Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "netflix",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "movies",
+      "name": "Top 10 Netflix Movies Today",
+      "description": "Top 10 Netflix movies in Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "netflix",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "Top 10 Netflix TV Shows Today",
+      "description": "Top 10 Netflix TV shows in Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "paramount-plus",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "movies",
+      "name": "Top 10 Paramount+ Movies Today",
+      "description": "Top 10 Paramount+ movies in Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "paramount-plus",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "Top 10 Paramount+ TV Shows Today",
+      "description": "Top 10 Paramount+ TV shows in Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "peacock",
+      "location": "united-states",
+      "fallback": false,
+      "limit": 10,
+      "type": "movies",
+      "name": "Top 10 Peacock Movies Today",
+      "description": "Top 10 Peacock movies in United States",
+      "normalizeName": true
+    },
+    {
+      "platform": "peacock",
+      "location": "united-states",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "Top 10 Peacock TV Shows Today",
+      "description": "Top 10 Peacock TV shows in United States",
+      "normalizeName": true
+    },
+    {
+      "platform": "rtl-plus",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "movies",
+      "name": "Top 10 RTL+ Movies Today",
+      "description": "Top 10 RTL+ movies in Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "rtl-plus",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "Top 10 RTL+ TV Shows Today",
+      "description": "Top 10 RTL+ TV shows in Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "wow",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "movies",
+      "name": "Top 10 WOW Movies Today",
+      "description": "Top 10 WOW movies in Germany",
+      "normalizeName": true
+    },
+    {
+      "platform": "wow",
+      "location": "germany",
+      "fallback": false,
+      "limit": 10,
+      "type": "shows",
+      "name": "Top 10 WOW TV Shows Today",
+      "description": "Top 10 WOW TV shows in Germany",
       "normalizeName": true
     }
   ],
