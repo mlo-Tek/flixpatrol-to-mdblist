@@ -156,6 +156,45 @@ def _patch_config_layout(sync) -> None:
     sync.load_config = load_config_with_layout
 
 
+def _candidate_ids(lst: dict) -> list[int]:
+    """Return plausible static-list IDs, preferring explicit static ID fields."""
+    preferred = (
+        "static_list_id",
+        "staticlist_id",
+        "static_id",
+        "staticId",
+        "list_id",
+        "listid",
+        "id",
+    )
+    ids = []
+    for key in preferred:
+        value = lst.get(key)
+        if value is None:
+            continue
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value not in ids:
+            ids.append(value)
+    return ids
+
+
+def _resolve_static_list_id(sync, mdb, lst: dict):
+    """Verify that a matching /lists/user entry is really a static list.
+
+    /lists/user can also return non-static list records. Their generic `id`
+    looks valid but `/lists/{id}/items/...` rejects it with
+    `Static list not found`. Probe candidate IDs before returning one.
+    """
+    for list_id in _candidate_ids(lst):
+        info = mdb._req("GET", f"/lists/{list_id}")
+        if info is not None:
+            return list_id
+    return None
+
+
 def _patch_static_list_metadata(sync) -> None:
     """Create lists with descriptions and migrate matching legacy list names."""
 
@@ -177,7 +216,15 @@ def _patch_static_list_metadata(sync) -> None:
             if not is_current and not is_legacy:
                 continue
 
-            list_id = lst["id"]
+            list_id = _resolve_static_list_id(sync, mdb, lst)
+            if list_id is None:
+                sync.logger.info(
+                    "  Ignoring non-static list with matching name: '%s' (id=%s)",
+                    list_name,
+                    lst.get("id"),
+                )
+                continue
+
             current_description = str(lst.get("description") or "")
             needs_update = (
                 list_name != name
@@ -195,47 +242,56 @@ def _patch_static_list_metadata(sync) -> None:
                     payload = {"name": name}
                     if description:
                         payload["description"] = description
-                    result = mdb._req(
-                        "PUT", f"/lists/{list_id}", json=payload
-                    )
-                    if result is not None:
+                    mdb._req("PUT", f"/lists/{list_id}", json=payload)
+                    # PUT may legitimately return an empty 2xx response, so
+                    # verify the same static-list ID afterwards instead of
+                    # interpreting None as a failure.
+                    if mdb._req("GET", f"/lists/{list_id}") is not None:
                         sync.logger.info(
-                            "  Updated list metadata: '%s' -> '%s'",
+                            "  Updated static list metadata: '%s' -> '%s' (id=%s)",
                             list_name,
                             name,
+                            list_id,
                         )
                     else:
                         sync.logger.warning(
-                            "  Could not update metadata for list id=%s; continuing with existing list",
+                            "  Could not update static list id=%s; trying another match",
                             list_id,
                         )
+                        continue
             else:
                 sync.logger.info(
-                    "  List exists: '%s' (id=%s)", list_name, list_id
+                    "  Static list exists: '%s' (id=%s)", list_name, list_id
                 )
             return list_id
 
         if sync.DRY_RUN:
-            sync.logger.info("  [DRY RUN] Would create list '%s'", name)
+            sync.logger.info("  [DRY RUN] Would create static list '%s'", name)
             if description:
                 sync.logger.info("  [DRY RUN] Description: %s", description)
             return None
 
-        sync.logger.info("  Creating list '%s' ...", name)
+        sync.logger.info("  Creating static list '%s' ...", name)
         payload = {"name": name}
         if description:
             payload["description"] = description
         result = mdb._req("POST", "/lists/user/add", json=payload)
         if result and "id" in result:
-            sync.logger.info("  Created (id=%s)", result["id"])
-            return result["id"]
+            list_id = int(result["id"])
+            sync.logger.info("  Created static list (id=%s)", list_id)
+            return list_id
 
-        # Some API responses do not return the new ID immediately.
+        # Some API responses do not return the new ID immediately. Search again,
+        # but only accept an ID that the static-list endpoint itself validates.
         for lst in mdb.get_my_lists():
-            if str(lst.get("name", "")).lower() == name.lower():
-                return lst["id"]
+            if str(lst.get("name", "")).lower() != name.lower():
+                continue
+            list_id = _resolve_static_list_id(sync, mdb, lst)
+            if list_id is not None:
+                sync.logger.info("  Found newly created static list (id=%s)", list_id)
+                return list_id
 
-        sync.logger.error("  Failed to create list '%s'", name)
+        sync.logger.error("  Failed to create static list '%s'", name)
         return None
 
     sync.find_or_create_list = find_or_create_list_with_metadata

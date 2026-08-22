@@ -73,6 +73,17 @@ class ListLayoutTests(unittest.TestCase):
         self.assertEqual(name, "Top 10 Crunchyroll Today")
         self.assertEqual(description, "Top 10 Crunchyroll titles in Germany")
 
+    def test_static_list_id_fields_are_preferred_over_generic_id(self):
+        self.assertEqual(
+            layout._candidate_ids(
+                {"id": 139604, "static_list_id": 203885, "name": "Example"}
+            ),
+            [203885, 139604],
+        )
+
+    def test_generic_id_remains_supported_for_real_static_lists(self):
+        self.assertEqual(layout._candidate_ids({"id": 203922}), [203922])
+
 
 if __name__ == "__main__":
     unittest.main()
