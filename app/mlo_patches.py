@@ -2,7 +2,9 @@
 
 Keeps the upstream application largely untouched while adding:
 - Joyn Germany fallback parsing from FlixPatrol's combined streaming overview.
-- Conservative alternate-title matching for subtitle/part-name variants.
+- Conservative alternate-title matching for subtitle/part-name/number variants.
+- MDBList search-query compatibility for punctuation that the API rejects.
+- Verified ID fallbacks for exact title/year cases that public metadata can identify.
 - A small FileCache race hardening when the cache directory is removed.
 """
 
@@ -12,16 +14,33 @@ import re
 from typing import Optional
 
 
-PATCH_VERSION = "1.0.0"
+PATCH_VERSION = "1.1.0"
+
+# Last-resort, exact title/year/media-type mappings for titles that are known to
+# exist but are not discoverable reliably by MDBList/TMDB text search. These are
+# intentionally narrow: all three fields must match before an ID is returned.
+VERIFIED_IDS = {
+    ("the lord of the skies", 2013, "show"): {
+        "imdb_id": "tt2777882",
+        "tmdb_id": 44953,
+    },
+    ("fantastic 4 rise of the silver surfer", 2007, "movie"): {
+        "imdb_id": "tt0486576",
+    },
+    ("dschungel divas luxus hat seinen preis", 2026, "show"): {
+        "tmdb_id": 329186,
+    },
+}
 
 
 def install(sync) -> None:
     """Install runtime patches onto the imported upstream module."""
     _patch_file_cache(sync)
+    _patch_mdblist_search_compat(sync)
     _patch_joyn_top10(sync)
     _patch_title_matching(sync)
     sync.logger.info(
-        "mlo-Tek patches %s enabled: Joyn overview fallback + safe alias matching",
+        "mlo-Tek patches %s enabled: Joyn fallback + safe matching + query compatibility",
         PATCH_VERSION,
     )
 
@@ -38,6 +57,36 @@ def _patch_file_cache(sync) -> None:
         return original_set(self, key, value)
 
     sync.FileCache.set = set_with_dir_recovery
+
+
+def _patch_mdblist_search_compat(sync) -> None:
+    """Keep harmless punctuation from causing MDBList HTTP 400 responses."""
+    original_search = sync.MDBListClient.search
+
+    def search_compat(self, title: str, media_type: str, year=None):
+        return original_search(
+            self,
+            _mdblist_safe_query(sync, title),
+            media_type,
+            year,
+        )
+
+    sync.MDBListClient.search = search_compat
+
+
+def _mdblist_safe_query(sync, title: str) -> str:
+    """Normalize only characters known to be problematic for MDBList search."""
+    query = sync._clean_search_query(title)
+    query = query.translate(str.maketrans({
+        "–": "-",
+        "—": "-",
+        "−": "-",
+    }))
+    # MDBList currently rejects some searches containing a literal question
+    # mark. Removing it does not weaken final matching because TitleMatcher
+    # still validates the returned title/year separately.
+    query = query.replace("?", "")
+    return re.sub(r"\s+", " ", query).strip()
 
 
 def _patch_joyn_top10(sync) -> None:
@@ -85,7 +134,9 @@ def _patch_joyn_top10(sync) -> None:
         results = []
         for mtype in sync._split_types(media_type):
             section_key = (mtype, kids)
-            section_items = sections.get(section_key, [])[:limit]
+            section_items = _dedupe_ranking_items(
+                sync, sections.get(section_key, [])
+            )[:limit]
             item_type = {
                 "movies": "movie",
                 "shows": "show",
@@ -97,12 +148,30 @@ def _patch_joyn_top10(sync) -> None:
 
         if results:
             sync.logger.info(
-                "  Joyn streaming-overview fallback returned %d item(s)",
+                "  Joyn streaming-overview fallback returned %d unique item(s)",
                 len(results),
             )
         return results
 
     sync.FlixPatrolScraper.get_top10 = get_top10_with_joyn_fallback
+
+
+def _dedupe_ranking_items(sync, items: list[dict]) -> list[dict]:
+    """Remove duplicate ranking rows while preserving the first chart position."""
+    result = []
+    seen = set()
+    for item in items:
+        title_key = sync.TitleMatcher._norm(item.get("title", ""))
+        url = (item.get("url") or "").strip()
+        # Within one provider/media chart, identical normalized titles are a
+        # duplicate ranking row. Prefer that over URL because FlixPatrol can
+        # occasionally emit the same title through two equivalent links.
+        key = ("title", title_key) if title_key else ("url", url)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
 
 
 def _parse_provider_sections(sync, scraper, soup, provider: str) -> dict:
@@ -111,7 +180,7 @@ def _parse_provider_sections(sync, scraper, soup, provider: str) -> dict:
     provider_heading = None
 
     # The combined page currently uses e.g.:
-    #   <h2>Joyn TOP 10 in Germany on ...</h2>
+    #   <h2>Joyn TOP 10 in Germany on August 22, 2026</h2>
     # followed by <h3>TOP 10 Movies</h3> and <h3>TOP 10 TV Shows</h3>.
     for heading in soup.find_all("h2"):
         text = " ".join(heading.stripped_strings).lower()
@@ -161,7 +230,7 @@ def _patch_title_matching(sync) -> None:
         self, title: str, title_info: dict, media_type: str
     ) -> Optional[dict]:
         year = title_info.get("year")
-        patch_cache_key = f"match:mlo:v1:{title}:{year}:{media_type}"
+        patch_cache_key = f"match:mlo:v2:{title}:{year}:{media_type}"
         cached = self.cache.get(patch_cache_key)
         if cached is not None:
             return cached if cached != "_MISS_" else None
@@ -184,6 +253,17 @@ def _patch_title_matching(sync) -> None:
             )
             return best
 
+        best = _verified_id_match(sync, title, year, media_type)
+        if best:
+            self.cache.set(patch_cache_key, best)
+            sync.logger.info(
+                "  Verified ID match: '%s' (%s) -> %s",
+                title,
+                year or "?",
+                best.get("imdb_id") or f"tmdb:{best.get('tmdb_id')}",
+            )
+            return best
+
         self.cache.set(patch_cache_key, "_MISS_")
         return None
 
@@ -194,8 +274,8 @@ def _title_aliases(sync, title: str) -> list[str]:
     """Generate conservative canonical-title candidates.
 
     We do not use arbitrary fuzzy matching. Every candidate is a deterministic
-    shortening of the FlixPatrol title and still has to match a MDBList/TMDB
-    result exactly (with the upstream year checks).
+    variant of the FlixPatrol title and still has to match a MDBList/TMDB result
+    exactly (with the upstream year checks).
     """
     original = sync._clean_search_query(title)
     original_norm = sync.TitleMatcher._norm(original)
@@ -240,6 +320,28 @@ def _title_aliases(sync, title: str) -> list[str]:
         prefix = original.split(":", 1)[0]
         if _specific_enough(sync, prefix):
             add(prefix)
+
+    # Some services use a digit where the canonical database title spells the
+    # number out, e.g. "Fantastic 4" -> "Fantastic Four". Each generated title
+    # is still subjected to exact result-title and year validation.
+    number_words = {
+        "1": "One",
+        "2": "Two",
+        "3": "Three",
+        "4": "Four",
+        "5": "Five",
+        "6": "Six",
+        "7": "Seven",
+        "8": "Eight",
+        "9": "Nine",
+        "10": "Ten",
+    }
+    for digit, word in number_words.items():
+        pattern = re.compile(rf"(?<!\w){re.escape(digit)}(?!\w)")
+        if pattern.search(original):
+            candidate = pattern.sub(word, original)
+            if _specific_enough(sync, candidate):
+                add(candidate)
 
     return aliases
 
@@ -296,3 +398,20 @@ def _search_exact_alias(sync, matcher, alias: str, year, media_type: str):
             return best
 
     return None
+
+
+def _verified_id_match(sync, title: str, year, media_type: str) -> Optional[dict]:
+    """Return a verified ID only for an exact normalized title/year/type key."""
+    if not year or media_type not in ("movie", "show"):
+        return None
+
+    key = (sync.TitleMatcher._norm(title), int(year), media_type)
+    ids = VERIFIED_IDS.get(key)
+    if not ids:
+        return None
+
+    result = dict(ids)
+    result["year"] = int(year)
+    result["_media_type"] = media_type
+    result["_src"] = "verified-id"
+    return result
