@@ -48,9 +48,61 @@ class MloAliasTests(unittest.TestCase):
         )
         self.assertNotIn("Demon Slayer", aliases)
 
+    def test_standalone_number_generates_word_alias(self):
+        aliases = mlo_patches._title_aliases(
+            sync, "Fantastic 4: Rise of the Silver Surfer"
+        )
+        self.assertIn(
+            "Fantastic Four: Rise of the Silver Surfer",
+            aliases,
+        )
+
     def test_short_ambiguous_titles_are_not_shortened(self):
         self.assertEqual(mlo_patches._title_aliases(sync, "From"), [])
         self.assertEqual(mlo_patches._title_aliases(sync, "It: Welcome to Derry"), [])
+
+
+class MDBListQueryCompatibilityTests(unittest.TestCase):
+    def test_problematic_punctuation_is_normalized_for_search_only(self):
+        self.assertEqual(
+            mlo_patches._mdblist_safe_query(
+                sync, "Die Landarztpraxis – Team Sonnenhof"
+            ),
+            "Die Landarztpraxis - Team Sonnenhof",
+        )
+        self.assertEqual(
+            mlo_patches._mdblist_safe_query(
+                sync, "Born Famous - Fluch oder Segen?"
+            ),
+            "Born Famous - Fluch oder Segen",
+        )
+
+
+class VerifiedIdTests(unittest.TestCase):
+    def test_the_lord_of_the_skies_has_verified_ids(self):
+        result = mlo_patches._verified_id_match(
+            sync, "The Lord of the Skies", 2013, "show"
+        )
+        self.assertEqual(result["imdb_id"], "tt2777882")
+        self.assertEqual(result["tmdb_id"], 44953)
+
+    def test_dschungel_divas_has_verified_tmdb_id(self):
+        result = mlo_patches._verified_id_match(
+            sync, "Dschungel Divas - Luxus hat seinen Preis", 2026, "show"
+        )
+        self.assertEqual(result["tmdb_id"], 329186)
+
+    def test_verified_ids_require_exact_year_and_type(self):
+        self.assertIsNone(
+            mlo_patches._verified_id_match(
+                sync, "The Lord of the Skies", 2014, "show"
+            )
+        )
+        self.assertIsNone(
+            mlo_patches._verified_id_match(
+                sync, "The Lord of the Skies", 2013, "movie"
+            )
+        )
 
 
 class JoynOverviewTests(unittest.TestCase):
@@ -82,6 +134,18 @@ class JoynOverviewTests(unittest.TestCase):
             ],
         )
         scraper.close()
+
+    def test_duplicate_rows_are_removed_by_url(self):
+        items = [
+            {"title": "Dschungel Divas", "url": "https://example/title/dschungel"},
+            {"title": "Dschungel Divas", "url": "https://example/title/dschungel"},
+            {"title": "NCIS", "url": "https://example/title/ncis"},
+        ]
+        deduped = mlo_patches._dedupe_ranking_items(sync, items)
+        self.assertEqual(
+            [item["title"] for item in deduped],
+            ["Dschungel Divas", "NCIS"],
+        )
 
 
 if __name__ == "__main__":
