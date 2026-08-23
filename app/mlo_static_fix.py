@@ -1,4 +1,4 @@
-"""Fix MDBList static-list ID handling.
+"""Fix MDBList static-list ID handling and improve sync diagnostics.
 
 MDBList exposes a generic list metadata id and, for static lists, a separate
 static-list id used by the /items/add and /items/remove endpoints. Reading
@@ -84,8 +84,97 @@ def _resolve_created_static_id(mdb, result: dict | None, name: str):
     return metadata_id(result)
 
 
+def _identifier_set(items_response: dict | None) -> set[tuple[str, str]]:
+    """Collect every IMDb/TMDB identifier returned by a static-list read."""
+    identifiers: set[tuple[str, str]] = set()
+    if not isinstance(items_response, dict):
+        return identifiers
+
+    for section in ("movies", "shows"):
+        for item in items_response.get(section, []) or []:
+            imdb = item.get("imdb_id") or item.get("imdb")
+            tmdb = item.get("tmdb_id") or item.get("tmdb")
+            if imdb:
+                identifiers.add(("imdb", str(imdb)))
+            if tmdb is not None:
+                identifiers.add(("tmdb", str(tmdb)))
+    return identifiers
+
+
+def _item_identifiers(item: dict) -> set[tuple[str, str]]:
+    identifiers: set[tuple[str, str]] = set()
+    imdb = item.get("imdb_id") or item.get("imdb")
+    tmdb = item.get("tmdb_id") or item.get("tmdb")
+    if imdb:
+        identifiers.add(("imdb", str(imdb)))
+    if tmdb is not None:
+        identifiers.add(("tmdb", str(tmdb)))
+    return identifiers
+
+
+def _patch_missing_item_diagnostics(sync) -> None:
+    """Log title and IDs for items MDBList did not retain after an add call."""
+    original_sync_items = sync.sync_items
+
+    def sync_items_with_diagnostics(mdb, list_id: int, items: list[dict], name: str):
+        original_get_list_items = mdb.get_list_items
+        original_add_items = mdb.add_items
+        reads = []
+        add_called = False
+
+        def recording_get_list_items(requested_list_id):
+            response = original_get_list_items(requested_list_id)
+            reads.append(response)
+            return response
+
+        def recording_add_items(requested_list_id, movies=None, shows=None):
+            nonlocal add_called
+            add_called = True
+            return original_add_items(requested_list_id, movies, shows)
+
+        mdb.get_list_items = recording_get_list_items
+        mdb.add_items = recording_add_items
+        try:
+            result = original_sync_items(mdb, list_id, items, name)
+        finally:
+            mdb.get_list_items = original_get_list_items
+            mdb.add_items = original_add_items
+
+        # Only diagnose a failed sync after an actual add attempt. This avoids
+        # reporting every target as missing when the failure happened earlier,
+        # for example while clearing old items.
+        if result is False and add_called and reads:
+            present_ids = _identifier_set(reads[-1])
+            missing_items = []
+            for item in items:
+                wanted_ids = _item_identifiers(item)
+                if wanted_ids and wanted_ids.isdisjoint(present_ids):
+                    missing_items.append(item)
+
+            if missing_items:
+                sync.logger.error(
+                    "  MDBList rejected/missed %d item(s) for '%s' (static_id=%s):",
+                    len(missing_items),
+                    name,
+                    list_id,
+                )
+                for item in missing_items:
+                    sync.logger.error(
+                        "    Missing item: '%s' | type=%s | year=%s | imdb=%s | tmdb=%s",
+                        item.get("title") or "<unknown>",
+                        item.get("type") or "?",
+                        item.get("year") or "?",
+                        item.get("imdb_id") or "-",
+                        item.get("tmdb_id") or "-",
+                    )
+
+        return result
+
+    sync.sync_items = sync_items_with_diagnostics
+
+
 def install(sync) -> None:
-    """Override only the broken static-list lookup/create path."""
+    """Override broken static-list lookup/create path and add diagnostics."""
 
     def find_or_create_static_list(mdb, name: str, slug: str):
         metadata = layout.LIST_METADATA.get(name.lower(), {})
@@ -171,6 +260,7 @@ def install(sync) -> None:
         return static_id
 
     sync.find_or_create_list = find_or_create_static_list
+    _patch_missing_item_diagnostics(sync)
     sync.logger.info(
-        "mlo-Tek static-list ID fix enabled: metadata_id and static_id separated"
+        "mlo-Tek static-list ID fix enabled: metadata_id/static_id separated + missing-item diagnostics"
     )
