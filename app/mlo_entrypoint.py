@@ -13,6 +13,7 @@ from mlo_patches import install as install_patches
 
 def enable_persistent_file_logging() -> Path:
     """Mirror console logs into /app/config/logs with daily rotation."""
+    # /app/config is the persistent Unraid appdata mapping, so logs survive updates.
     config_dir = Path(os.environ.get("CONFIG_DIR", "/app/config"))
     log_dir = Path(os.environ.get("LOG_DIR", str(config_dir / "logs")))
     log_dir.mkdir(parents=True, exist_ok=True)
