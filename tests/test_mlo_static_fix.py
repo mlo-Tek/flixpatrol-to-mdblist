@@ -31,6 +31,7 @@ class StaticIdSeparationTests(unittest.TestCase):
         sync = Mock()
         sync.DRY_RUN = False
         sync.logger = Mock()
+        sync.sync_items = Mock()
         mdb = Mock()
 
         mdb.get_my_lists.side_effect = [
@@ -74,6 +75,7 @@ class StaticIdSeparationTests(unittest.TestCase):
         sync = Mock()
         sync.DRY_RUN = False
         sync.logger = Mock()
+        sync.sync_items = Mock()
         mdb = Mock()
         mdb.get_my_lists.return_value = [{
             "id": 139604,
@@ -104,6 +106,98 @@ class StaticIdSeparationTests(unittest.TestCase):
                 "name": "Top 10 Amazon Prime Movies Today",
                 "description": "Top 10 Amazon Prime movies in Germany",
             },
+        )
+
+
+class MissingItemDiagnosticsTests(unittest.TestCase):
+    def test_failed_add_logs_exact_missing_title_and_ids(self):
+        sync = Mock()
+        sync.DRY_RUN = False
+        sync.logger = Mock()
+
+        def original_sync_items(mdb, list_id, items, name):
+            mdb.get_list_items(list_id)
+            mdb.add_items(
+                list_id,
+                [{"imdb": "tt1111111"}, {"imdb": "tt2222222", "tmdb": 222}],
+                None,
+            )
+            mdb.get_list_items(list_id)
+            return False
+
+        sync.sync_items = original_sync_items
+        static_fix._patch_missing_item_diagnostics(sync)
+
+        mdb = Mock()
+        mdb.get_list_items.side_effect = [
+            {"movies": [], "shows": []},
+            {
+                "movies": [{"imdb_id": "tt1111111"}],
+                "shows": [],
+            },
+        ]
+        mdb.add_items.return_value = {"added": {"movies": 1, "shows": 0}}
+
+        items = [
+            {
+                "title": "Kept Movie",
+                "type": "movie",
+                "year": 2026,
+                "imdb_id": "tt1111111",
+            },
+            {
+                "title": "Rejected Movie",
+                "type": "movie",
+                "year": 2025,
+                "imdb_id": "tt2222222",
+                "tmdb_id": 222,
+            },
+        ]
+
+        result = sync.sync_items(mdb, 220123, items, "Top 10 Test Movies Today")
+
+        self.assertFalse(result)
+        error_calls = [call.args for call in sync.logger.error.call_args_list]
+        self.assertTrue(
+            any(
+                args
+                and args[0].startswith("    Missing item:")
+                and "Rejected Movie" in args
+                and "tt2222222" in args
+                and 222 in args
+                for args in error_calls
+            )
+        )
+        self.assertFalse(
+            any(args and "Kept Movie" in args for args in error_calls)
+        )
+
+    def test_no_missing_item_diagnostics_when_failure_happens_before_add(self):
+        sync = Mock()
+        sync.logger = Mock()
+
+        def original_sync_items(mdb, list_id, items, name):
+            mdb.get_list_items(list_id)
+            return False
+
+        sync.sync_items = original_sync_items
+        static_fix._patch_missing_item_diagnostics(sync)
+
+        mdb = Mock()
+        mdb.get_list_items.return_value = {"movies": [], "shows": []}
+
+        sync.sync_items(
+            mdb,
+            220123,
+            [{"title": "Example", "type": "movie", "imdb_id": "tt1234567"}],
+            "Top 10 Test Movies Today",
+        )
+
+        self.assertFalse(
+            any(
+                call.args and "Missing item:" in call.args[0]
+                for call in sync.logger.error.call_args_list
+            )
         )
 
 
