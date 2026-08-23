@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ .
 
 # Fail the image build early if the fork-specific Python files contain syntax errors.
-RUN python -m py_compile flixpatrol_to_mdblist.py mlo_patches.py mlo_entrypoint.py
+RUN python -m py_compile flixpatrol_to_mdblist.py mlo_patches.py mlo_list_layout.py mlo_static_fix.py mlo_entrypoint.py
 
 # Keep the complete default config outside the mounted /app/config directory.
 # The application installs it when the config volume is empty.
