@@ -3,9 +3,23 @@
 MDBList may remap a submitted TMDB id to another identifier representation
 when items are read back. Verification therefore uses both identifier overlap
 and final item counts instead of requiring the exact submitted key to reappear.
+
+For TMDB-only matches we also try to resolve an IMDb id through TMDB's
+external_ids endpoint before writing to MDBList. MDBList's static-list API is
+more reliable with IMDb identifiers for a few newly added/re-cut titles.
 """
 
 from __future__ import annotations
+
+import os
+
+
+# Exact, publicly verified aliases for cases where the streaming chart exposes a
+# newly named cut/edition but it is still the same IMDb feature film.
+VERIFIED_IMDB_WRITE_IDS = {
+    ("the x-files: i want to believe – vrach frankenshteyn", 2026, "movie"): "tt0443701",
+    ("the x-files: i want to believe - vrach frankenshteyn", 2026, "movie"): "tt0443701",
+}
 
 
 def _ids(item: dict) -> set[tuple[str, str]]:
@@ -29,7 +43,78 @@ def _count(existing: dict | None) -> int:
     return len(_flatten(existing))
 
 
-def _target_payload(items: list[dict]):
+def _verified_imdb_id(item: dict):
+    title = str(item.get("title") or "").strip().lower()
+    try:
+        year = int(item.get("year")) if item.get("year") is not None else None
+    except (TypeError, ValueError):
+        year = None
+    media_type = str(item.get("type") or "").strip().lower()
+    return VERIFIED_IMDB_WRITE_IDS.get((title, year, media_type))
+
+
+def _tmdb_external_imdb(sync, item: dict):
+    """Resolve IMDb from TMDB external_ids for a TMDB-only matched item."""
+    tmdb_id = item.get("tmdb_id") or item.get("tmdb")
+    if not tmdb_id or item.get("imdb_id") or item.get("imdb"):
+        return None
+
+    api_key = os.environ.get("TMDB_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    media_type = str(item.get("type") or "").lower()
+    endpoint_type = "movie" if media_type == "movie" else "tv" if media_type == "show" else None
+    if endpoint_type is None:
+        return None
+
+    try:
+        response = sync.requests.get(
+            f"{sync.TMDB_API_BASE}/{endpoint_type}/{tmdb_id}/external_ids",
+            params={"api_key": api_key},
+            timeout=15,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (sync.requests.RequestException, ValueError, TypeError) as exc:
+        sync.logger.warning(
+            "  Could not resolve TMDB external IDs for '%s' (tmdb=%s): %s",
+            item.get("title") or "?",
+            tmdb_id,
+            exc,
+        )
+        return None
+
+    imdb_id = data.get("imdb_id") if isinstance(data, dict) else None
+    if imdb_id:
+        sync.logger.info(
+            "  Enriched TMDB-only match with IMDb: '%s' | tmdb=%s -> imdb=%s",
+            item.get("title") or "?",
+            tmdb_id,
+            imdb_id,
+        )
+        return str(imdb_id)
+    return None
+
+
+def _preferred_imdb_id(sync, item: dict):
+    existing = item.get("imdb_id") or item.get("imdb")
+    if existing:
+        return str(existing)
+
+    verified = _verified_imdb_id(item)
+    if verified:
+        sync.logger.info(
+            "  Using verified IMDb write ID for '%s': %s",
+            item.get("title") or "?",
+            verified,
+        )
+        return verified
+
+    return _tmdb_external_imdb(sync, item)
+
+
+def _target_payload(sync, items: list[dict]):
     movies_add = []
     shows_add = []
     target_rows = []
@@ -37,15 +122,16 @@ def _target_payload(items: list[dict]):
 
     for item in items:
         entry = {}
-        if item.get("imdb_id"):
-            entry["imdb"] = item["imdb_id"]
-        if item.get("tmdb_id"):
+        imdb_id = _preferred_imdb_id(sync, item)
+        if imdb_id:
+            # Prefer IMDb alone when available. This avoids an occasional MDBList
+            # rejection where a new TMDB id is not yet mapped by the static API.
+            entry["imdb"] = imdb_id
+        elif item.get("tmdb_id"):
             entry["tmdb"] = item["tmdb_id"]
         if not entry:
             continue
 
-        # Avoid submitting the same media twice when a provider chart contains
-        # a duplicate row. Prefer IMDb as the stable dedupe key, otherwise TMDB.
         key = (
             ("imdb", str(entry["imdb"]))
             if entry.get("imdb")
@@ -120,7 +206,7 @@ def install(sync) -> None:
             )
             return False
 
-        movies_add, shows_add, target_rows = _target_payload(items)
+        movies_add, shows_add, target_rows = _target_payload(sync, items)
         target_count = len(target_rows)
         if not target_count:
             sync.logger.warning("  No usable unique IDs to add to '%s'", name)
@@ -163,9 +249,6 @@ def install(sync) -> None:
         final_count = _count(after_add)
         unmatched = _unmatched_targets(target_rows, after_add)
 
-        # Exact IDs are ideal, but MDBList can remap a TMDB-only submission to
-        # another identifier when returning list contents. If the final list
-        # contains the full expected number of unique items, accept it.
         if final_count == target_count:
             if unmatched:
                 sync.logger.info(
