@@ -9,6 +9,7 @@ from pathlib import Path
 import flixpatrol_to_mdblist as sync
 from mlo_list_layout import install as install_list_layout
 from mlo_patches import install as install_patches
+from mlo_static_fix import install as install_static_fix
 
 
 def enable_persistent_file_logging() -> Path:
@@ -47,5 +48,6 @@ if __name__ == "__main__":
     log_file = enable_persistent_file_logging()
     install_patches(sync)
     install_list_layout(sync)
+    install_static_fix(sync)
     sync.logger.info("Persistent log file: %s", log_file)
     sync.main()
