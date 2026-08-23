@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from copy import deepcopy
 
 
@@ -36,6 +37,7 @@ LIST_METADATA: dict[str, dict] = {}
 def install(sync) -> None:
     _patch_config_layout(sync)
     _patch_static_list_metadata(sync)
+    _patch_static_list_sync(sync)
     sync.logger.info(
         "mlo-Tek list layout enabled: alphabetical providers + Today names + descriptions"
     )
@@ -182,16 +184,38 @@ def _candidate_ids(lst: dict) -> list[int]:
 
 
 def _resolve_static_list_id(sync, mdb, lst: dict):
-    """Verify that a matching /lists/user entry is really a static list.
+    """Return only an ID accepted by MDBList's static-list items endpoint.
 
-    /lists/user can also return non-static list records. Their generic `id`
-    looks valid but `/lists/{id}/items/...` rejects it with
-    `Static list not found`. Probe candidate IDs before returning one.
+    `/lists/user` may contain dynamic/linked/etc. records whose generic `id`
+    is valid for list metadata but is *not* a static-list ID. `GET /lists/{id}`
+    therefore is not a sufficient discriminator. The items endpoint is the
+    canonical API used by add/remove operations, so probe that exact endpoint.
     """
     for list_id in _candidate_ids(lst):
-        info = mdb._req("GET", f"/lists/{list_id}")
-        if info is not None:
+        items = mdb.get_list_items(list_id)
+        if items is not None:
             return list_id
+    return None
+
+
+def _resolve_created_static_list_id(sync, mdb, result: dict | None, name: str):
+    """Resolve a newly created list, tolerating API response-shape differences."""
+    if isinstance(result, dict):
+        list_id = _resolve_static_list_id(sync, mdb, result)
+        if list_id is not None:
+            return list_id
+
+    # Creation can become visible fractionally later and some responses do not
+    # include the usable static ID. Retry the user's lists briefly.
+    for attempt in range(3):
+        if attempt:
+            time.sleep(0.5)
+        for lst in mdb.get_my_lists():
+            if str(lst.get("name", "")).lower() != name.lower():
+                continue
+            list_id = _resolve_static_list_id(sync, mdb, lst)
+            if list_id is not None:
+                return list_id
     return None
 
 
@@ -219,7 +243,7 @@ def _patch_static_list_metadata(sync) -> None:
             list_id = _resolve_static_list_id(sync, mdb, lst)
             if list_id is None:
                 sync.logger.info(
-                    "  Ignoring non-static list with matching name: '%s' (id=%s)",
+                    "  Ignoring matching non-static list: '%s' (id=%s)",
                     list_name,
                     lst.get("id"),
                 )
@@ -243,25 +267,23 @@ def _patch_static_list_metadata(sync) -> None:
                     if description:
                         payload["description"] = description
                     mdb._req("PUT", f"/lists/{list_id}", json=payload)
-                    # PUT may legitimately return an empty 2xx response, so
-                    # verify the same static-list ID afterwards instead of
-                    # interpreting None as a failure.
-                    if mdb._req("GET", f"/lists/{list_id}") is not None:
+                    # Revalidate through the static-list endpoint, not metadata.
+                    if mdb.get_list_items(list_id) is not None:
                         sync.logger.info(
-                            "  Updated static list metadata: '%s' -> '%s' (id=%s)",
+                            "  Updated static list metadata: '%s' -> '%s' (static_id=%s)",
                             list_name,
                             name,
                             list_id,
                         )
                     else:
                         sync.logger.warning(
-                            "  Could not update static list id=%s; trying another match",
+                            "  Static list id=%s failed revalidation; trying another match",
                             list_id,
                         )
                         continue
             else:
                 sync.logger.info(
-                    "  Static list exists: '%s' (id=%s)", list_name, list_id
+                    "  Static list exists: '%s' (static_id=%s)", list_name, list_id
                 )
             return list_id
 
@@ -276,22 +298,164 @@ def _patch_static_list_metadata(sync) -> None:
         if description:
             payload["description"] = description
         result = mdb._req("POST", "/lists/user/add", json=payload)
-        if result and "id" in result:
-            list_id = int(result["id"])
-            sync.logger.info("  Created static list (id=%s)", list_id)
+        list_id = _resolve_created_static_list_id(sync, mdb, result, name)
+        if list_id is not None:
+            sync.logger.info("  Created static list (static_id=%s)", list_id)
             return list_id
 
-        # Some API responses do not return the new ID immediately. Search again,
-        # but only accept an ID that the static-list endpoint itself validates.
-        for lst in mdb.get_my_lists():
-            if str(lst.get("name", "")).lower() != name.lower():
-                continue
-            list_id = _resolve_static_list_id(sync, mdb, lst)
-            if list_id is not None:
-                sync.logger.info("  Found newly created static list (id=%s)", list_id)
-                return list_id
-
-        sync.logger.error("  Failed to create static list '%s'", name)
+        sync.logger.error("  Failed to create/resolve static list '%s'", name)
         return None
 
     sync.find_or_create_list = find_or_create_list_with_metadata
+
+
+def _item_key(item: dict) -> tuple[str, str] | None:
+    imdb = item.get("imdb_id") or item.get("imdb")
+    if imdb:
+        return ("imdb", str(imdb))
+    tmdb = item.get("tmdb_id") or item.get("tmdb")
+    if tmdb is not None:
+        return ("tmdb", str(tmdb))
+    return None
+
+
+def _response_item_keys(existing: dict | None) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    if not isinstance(existing, dict):
+        return keys
+    for section in ("movies", "shows"):
+        for item in existing.get(section, []) or []:
+            key = _item_key(item)
+            if key:
+                keys.add(key)
+    return keys
+
+
+def _patch_static_list_sync(sync) -> None:
+    """Sync only verified static IDs and never log failed API writes as success."""
+
+    def sync_items_verified(mdb, list_id: int, items: list[dict], name: str):
+        if not items:
+            sync.logger.warning("  No matched items for '%s'", name)
+            return False
+
+        if sync.DRY_RUN:
+            sync.logger.info(
+                "  [DRY RUN] Would sync %d items to '%s'", len(items), name
+            )
+            return True
+
+        # This exact endpoint must work before any destructive operation.
+        existing = mdb.get_list_items(list_id)
+        if existing is None:
+            sync.logger.error(
+                "  Aborting sync for '%s': id=%s is not a usable static-list ID",
+                name,
+                list_id,
+            )
+            return False
+
+        movies_add = []
+        shows_add = []
+        target_keys: set[tuple[str, str]] = set()
+        for item in items:
+            entry = {}
+            if item.get("imdb_id"):
+                entry["imdb"] = item["imdb_id"]
+            if item.get("tmdb_id"):
+                entry["tmdb"] = item["tmdb_id"]
+            if not entry:
+                continue
+            key = _item_key(entry)
+            if key:
+                target_keys.add(key)
+            if item.get("type") == "movie":
+                movies_add.append(entry)
+            else:
+                shows_add.append(entry)
+
+        rm_movies = []
+        rm_shows = []
+        for movie in existing.get("movies", []) or []:
+            entry = {}
+            if movie.get("imdb_id"):
+                entry["imdb"] = movie["imdb_id"]
+            elif movie.get("tmdb_id"):
+                entry["tmdb"] = movie["tmdb_id"]
+            if entry:
+                rm_movies.append(entry)
+        for show in existing.get("shows", []) or []:
+            entry = {}
+            if show.get("imdb_id"):
+                entry["imdb"] = show["imdb_id"]
+            elif show.get("tmdb_id"):
+                entry["tmdb"] = show["tmdb_id"]
+            if entry:
+                rm_shows.append(entry)
+
+        if rm_movies or rm_shows:
+            mdb.remove_items(list_id, rm_movies or None, rm_shows or None)
+            after_remove = mdb.get_list_items(list_id)
+            if after_remove is None:
+                sync.logger.error(
+                    "  Remove failed for '%s' (static_id=%s); aborting add",
+                    name,
+                    list_id,
+                )
+                return False
+            remaining = _response_item_keys(after_remove)
+            removed_keys = {
+                key
+                for entry in [*rm_movies, *rm_shows]
+                if (key := _item_key(entry)) is not None
+            }
+            still_present = removed_keys & remaining
+            if still_present:
+                sync.logger.error(
+                    "  Remove verification failed for '%s' (static_id=%s): %d old item(s) remain",
+                    name,
+                    list_id,
+                    len(still_present),
+                )
+                return False
+            sync.logger.info(
+                "  Removed %d old items from '%s' (static_id=%s)",
+                len(rm_movies) + len(rm_shows),
+                name,
+                list_id,
+            )
+
+        if not movies_add and not shows_add:
+            sync.logger.warning("  No usable IDs to add to '%s'", name)
+            return False
+
+        mdb.add_items(list_id, movies_add or None, shows_add or None)
+        after_add = mdb.get_list_items(list_id)
+        if after_add is None:
+            sync.logger.error(
+                "  Add failed for '%s' (static_id=%s)", name, list_id
+            )
+            return False
+
+        present = _response_item_keys(after_add)
+        missing = target_keys - present
+        if missing:
+            sync.logger.error(
+                "  Add verification failed for '%s' (static_id=%s): %d/%d target item(s) missing",
+                name,
+                list_id,
+                len(missing),
+                len(target_keys),
+            )
+            return False
+
+        sync.logger.info(
+            "  Synced '%s' successfully: %d movies + %d shows (static_id=%s)",
+            name,
+            len(movies_add),
+            len(shows_add),
+            list_id,
+        )
+        return True
+
+    sync.sync_items = sync_items_verified
