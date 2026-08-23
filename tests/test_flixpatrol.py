@@ -154,7 +154,8 @@ class ConfigTests(unittest.TestCase):
                 sync.load_config()
 
             installed = json.loads(config_file.read_text())
-            self.assertEqual(len(installed["FlixPatrolTop10"]), 15)
+            expected = json.loads(bundled.read_text())
+            self.assertEqual(installed, expected)
 
 
 class Top10ParsingTests(unittest.TestCase):
@@ -175,16 +176,29 @@ class Top10ParsingTests(unittest.TestCase):
         )
         scraper.close()
 
-    def test_germany_lists_are_defined_in_json_config_only(self):
+    def test_top10_lists_are_defined_in_json_config_only(self):
         config_path = Path(__file__).resolve().parents[1] / "config" / "default.json"
         entries = json.loads(config_path.read_text())["FlixPatrolTop10"]
 
-        self.assertEqual(len(entries), 15)
-        self.assertTrue(all(entry["location"] == "germany" for entry in entries))
-        self.assertEqual(
-            [(entry["platform"], entry["type"]) for entry in entries[-3:]],
-            [("wow", "movies"), ("wow", "shows"), ("crunchyroll", "overall")],
-        )
+        self.assertTrue(entries)
+        us_only = {"hulu", "peacock"}
+        for entry in entries:
+            expected_location = (
+                "united-states" if entry["platform"] in us_only else "germany"
+            )
+            self.assertEqual(entry["location"], expected_location)
+
+        configured = {
+            (entry["platform"], entry["type"], entry["location"])
+            for entry in entries
+        }
+        self.assertIn(("netflix", "movies", "germany"), configured)
+        self.assertIn(("netflix", "shows", "germany"), configured)
+        self.assertIn(("hulu", "movies", "united-states"), configured)
+        self.assertIn(("hulu", "shows", "united-states"), configured)
+        self.assertIn(("peacock", "movies", "united-states"), configured)
+        self.assertIn(("peacock", "shows", "united-states"), configured)
+        self.assertIn(("crunchyroll", "overall", "germany"), configured)
         self.assertEqual(sync.DEFAULT_CONFIG["FlixPatrolTop10"], [])
         self.assertFalse(hasattr(sync, "GERMANY_TOP10_PROVIDERS"))
 
