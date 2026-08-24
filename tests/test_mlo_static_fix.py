@@ -1,65 +1,171 @@
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 import mlo_list_layout as layout
 import mlo_static_fix as static_fix
+from unittest.mock import Mock
 
 
-class StaticIdSeparationTests(unittest.TestCase):
-    def test_generic_metadata_id_is_not_treated_as_static_id(self):
-        record = {
-            "id": 139604,
-            "name": "Top 10 Amazon Prime Movies Today",
+class StaticListReuseTests(unittest.TestCase):
+    def setUp(self):
+        layout.LIST_METADATA.clear()
+        layout.LIST_METADATA["top 10 amazon prime movies today"] = {
+            "description": "Top 10 Amazon Prime movies in Germany",
+            "legacy_names": ["Amazon Prime Top 10 Movies Germany"],
         }
-        self.assertIsNone(static_fix.explicit_static_id(record))
-        self.assertEqual(static_fix.metadata_id(record), 139604)
 
-    def test_explicit_static_id_is_used_for_item_writes(self):
-        record = {
-            "id": 139604,
-            "static_list_id": 203885,
-            "name": "Top 10 Amazon Prime Movies Today",
-        }
-        self.assertEqual(static_fix.metadata_id(record), 139604)
-        self.assertEqual(static_fix.explicit_static_id(record), 203885)
-
-    def test_matching_non_static_record_is_ignored_and_new_static_created(self):
+    def _sync(self):
         sync = Mock()
         sync.DRY_RUN = False
         sync.logger = Mock()
         sync.sync_items = Mock()
-        mdb = Mock()
+        return sync
 
-        mdb.get_my_lists.side_effect = [
-            [{
-                "id": 139604,
-                "name": "Top 10 Amazon Prime Movies Today",
-            }],
-            [{
-                "id": 139999,
-                "static_list_id": 220123,
-                "name": "Top 10 Amazon Prime Movies Today",
-            }],
-        ]
-        mdb._req.return_value = {"id": 139999}
-
-        layout.LIST_METADATA.clear()
-        layout.LIST_METADATA["top 10 amazon prime movies today"] = {
-            "description": "Top 10 Amazon Prime movies in Germany",
-            "legacy_names": [],
+    def test_generic_id_is_still_not_an_explicit_static_id(self):
+        record = {
+            "id": 204122,
+            "name": "Top 10 Amazon Prime Movies Today",
+            "dynamic": False,
         }
+        self.assertIsNone(static_fix.explicit_static_id(record))
+        self.assertEqual(static_fix.metadata_id(record), 204122)
+
+    def test_dynamic_false_record_uses_plain_id_for_static_writes(self):
+        record = {
+            "id": 204122,
+            "name": "Top 10 Amazon Prime Movies Today",
+            "dynamic": False,
+        }
+        self.assertEqual(static_fix.static_write_id(record), 204122)
+
+    def test_missing_dynamic_flag_reuses_plain_id_instead_of_creating_duplicate(self):
+        record = {
+            "id": 204122,
+            "name": "Top 10 Amazon Prime Movies Today",
+        }
+        self.assertEqual(static_fix.static_write_id(record), 204122)
+
+    def test_dynamic_true_record_is_not_static(self):
+        record = {
+            "id": 139604,
+            "name": "Top 10 Amazon Prime Movies Today",
+            "dynamic": True,
+        }
+        self.assertIsNone(static_fix.static_write_id(record))
+
+    def test_explicit_static_id_is_preferred_when_present(self):
+        record = {
+            "id": 139604,
+            "static_list_id": 203885,
+            "name": "Top 10 Amazon Prime Movies Today",
+            "dynamic": False,
+        }
+        self.assertEqual(static_fix.static_write_id(record), 203885)
+
+    def test_existing_static_list_is_reused_without_create(self):
+        sync = self._sync()
+        mdb = Mock()
+        mdb.get_my_lists.return_value = [{
+            "id": 204122,
+            "name": "Top 10 Amazon Prime Movies Today",
+            "slug": "top-10-amazon-prime-movies-today",
+            "description": "Top 10 Amazon Prime movies in Germany",
+            "dynamic": False,
+        }]
 
         static_fix.install(sync)
-        with patch.object(static_fix.time, "sleep"):
-            list_id = sync.find_or_create_list(
-                mdb,
-                "Top 10 Amazon Prime Movies Today",
-                "top-10-amazon-prime-movies-today",
-            )
+        list_id = sync.find_or_create_list(
+            mdb,
+            "Top 10 Amazon Prime Movies Today",
+            "top-10-amazon-prime-movies-today",
+        )
+
+        self.assertEqual(list_id, 204122)
+        mdb._req.assert_not_called()
+
+    def test_existing_static_without_dynamic_field_is_reused_without_create(self):
+        sync = self._sync()
+        mdb = Mock()
+        mdb.get_my_lists.return_value = [{
+            "id": 204122,
+            "name": "Top 10 Amazon Prime Movies Today",
+            "slug": "top-10-amazon-prime-movies-today",
+            "description": "Top 10 Amazon Prime movies in Germany",
+        }]
+
+        static_fix.install(sync)
+        list_id = sync.find_or_create_list(
+            mdb,
+            "Top 10 Amazon Prime Movies Today",
+            "top-10-amazon-prime-movies-today",
+        )
+
+        self.assertEqual(list_id, 204122)
+        mdb._req.assert_not_called()
+
+    def test_existing_duplicates_reuse_newest_exact_match_and_do_not_create(self):
+        sync = self._sync()
+        mdb = Mock()
+        mdb.get_my_lists.return_value = [
+            {
+                "id": 204122,
+                "name": "Top 10 Amazon Prime Movies Today",
+                "description": "Top 10 Amazon Prime movies in Germany",
+                "dynamic": False,
+            },
+            {
+                "id": 204150,
+                "name": "Top 10 Amazon Prime Movies Today",
+                "description": "Top 10 Amazon Prime movies in Germany",
+                "dynamic": False,
+            },
+        ]
+
+        static_fix.install(sync)
+        list_id = sync.find_or_create_list(
+            mdb,
+            "Top 10 Amazon Prime Movies Today",
+            "top-10-amazon-prime-movies-today",
+        )
+
+        self.assertEqual(list_id, 204150)
+        mdb._req.assert_not_called()
+        sync.logger.warning.assert_called_once()
+
+    def test_matching_dynamic_list_blocks_duplicate_creation(self):
+        sync = self._sync()
+        mdb = Mock()
+        mdb.get_my_lists.return_value = [{
+            "id": 139604,
+            "name": "Top 10 Amazon Prime Movies Today",
+            "dynamic": True,
+        }]
+
+        static_fix.install(sync)
+        list_id = sync.find_or_create_list(
+            mdb,
+            "Top 10 Amazon Prime Movies Today",
+            "top-10-amazon-prime-movies-today",
+        )
+
+        self.assertIsNone(list_id)
+        mdb._req.assert_not_called()
+
+    def test_no_match_creates_one_static_list(self):
+        sync = self._sync()
+        mdb = Mock()
+        mdb.get_my_lists.return_value = []
+        mdb._req.return_value = {"id": 220123}
+
+        static_fix.install(sync)
+        list_id = sync.find_or_create_list(
+            mdb,
+            "Top 10 Amazon Prime Movies Today",
+            "top-10-amazon-prime-movies-today",
+        )
 
         self.assertEqual(list_id, 220123)
         mdb._req.assert_called_once_with(
@@ -71,25 +177,16 @@ class StaticIdSeparationTests(unittest.TestCase):
             },
         )
 
-    def test_metadata_update_uses_generic_id_but_returns_static_id(self):
-        sync = Mock()
-        sync.DRY_RUN = False
-        sync.logger = Mock()
-        sync.sync_items = Mock()
+    def test_metadata_update_reuses_same_list_id(self):
+        sync = self._sync()
         mdb = Mock()
         mdb.get_my_lists.return_value = [{
-            "id": 139604,
-            "static_list_id": 203885,
+            "id": 204122,
             "name": "Amazon Prime Top 10 Movies Germany",
             "description": "old",
+            "dynamic": False,
         }]
         mdb._req.return_value = {}
-
-        layout.LIST_METADATA.clear()
-        layout.LIST_METADATA["top 10 amazon prime movies today"] = {
-            "description": "Top 10 Amazon Prime movies in Germany",
-            "legacy_names": ["Amazon Prime Top 10 Movies Germany"],
-        }
 
         static_fix.install(sync)
         list_id = sync.find_or_create_list(
@@ -98,10 +195,10 @@ class StaticIdSeparationTests(unittest.TestCase):
             "top-10-amazon-prime-movies-today",
         )
 
-        self.assertEqual(list_id, 203885)
+        self.assertEqual(list_id, 204122)
         mdb._req.assert_called_once_with(
             "PUT",
-            "/lists/139604",
+            "/lists/204122",
             json={
                 "name": "Top 10 Amazon Prime Movies Today",
                 "description": "Top 10 Amazon Prime movies in Germany",
