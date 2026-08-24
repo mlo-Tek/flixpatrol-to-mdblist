@@ -1,9 +1,10 @@
-"""Fix MDBList static-list ID handling and improve sync diagnostics.
+"""Fix MDBList static-list reuse and improve sync diagnostics.
 
-MDBList exposes a generic list metadata id and, for static lists, a separate
-static-list id used by the /items/add and /items/remove endpoints. Reading
-/list/{id}/items is not sufficient to distinguish them because non-static
-lists can also be readable there. Keep the two identifiers separate.
+MDBList's /lists/user records use the normal `id` for list operations and mark
+dynamic lists with `dynamic=true`. Earlier fork patches incorrectly required a
+separate `static_list_id` field, so existing static lists were ignored and a
+new list was created on every scheduled run. Reuse existing non-dynamic list
+IDs and only create a list when no matching list exists at all.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ def _as_positive_int(value):
 
 
 def explicit_static_id(record: dict | None):
-    """Return only an explicitly identified MDBList static-list id."""
+    """Return a separately named static-list id when an API variant provides one."""
     if not isinstance(record, dict):
         return None
     for key in STATIC_ID_KEYS:
@@ -41,10 +42,61 @@ def explicit_static_id(record: dict | None):
 
 
 def metadata_id(record: dict | None):
-    """Return the generic list id used for metadata operations."""
+    """Return MDBList's normal list id."""
     if not isinstance(record, dict):
         return None
     return _as_positive_int(record.get("id"))
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def static_write_id(record: dict | None):
+    """Return the ID that may be used for static-list item writes.
+
+    MDBList's /lists/user response exposes static lists as normal list records.
+    Their plain `id` is the ID used by /lists/{id}/items/add|remove. Dynamic
+    lists are explicitly marked with `dynamic=true` and must not be used for
+    static-list writes.
+
+    Some API variants may expose an explicit static id; prefer that when it is
+    present. If `dynamic` is omitted, fail closed against duplicate creation by
+    reusing the matching normal ID rather than creating another same-named list.
+    A bad/unsupported ID then causes the content sync to fail visibly, but no
+    duplicate list is created.
+    """
+    if not isinstance(record, dict):
+        return None
+
+    explicit = explicit_static_id(record)
+    if explicit is not None:
+        return explicit
+
+    generic = metadata_id(record)
+    if generic is None:
+        return None
+
+    list_type = str(
+        record.get("list_type") or record.get("type") or ""
+    ).strip().lower()
+    if list_type in {"dynamic", "generated"}:
+        return None
+    if list_type == "static" or record.get("static") is True:
+        return generic
+
+    if "dynamic" in record and _truthy(record.get("dynamic")):
+        return None
+
+    # `/lists/user` uses the regular id for static lists. Missing/false dynamic
+    # therefore means the record is reusable for our static list.
+    return generic
 
 
 def _matching_record(records, name: str, slug: str, legacy_names: set[str]):
@@ -58,30 +110,39 @@ def _matching_record(records, name: str, slug: str, legacy_names: set[str]):
             yield record
 
 
+def _match_priority(record: dict, name: str, slug: str):
+    """Prefer exact current names, then exact slug, then the newest list id."""
+    list_name = str(record.get("name", ""))
+    exact_name = list_name.lower() == name.lower()
+    exact_slug = record.get("slug") == slug
+    write_id = static_write_id(record) or 0
+    return (1 if exact_name else 0, 1 if exact_slug else 0, write_id)
+
+
 def _resolve_created_static_id(mdb, result: dict | None, name: str):
     """Resolve the write id after POST /lists/user/add.
 
-    Prefer an explicit static id from either the create response or the next
-    /lists/user snapshots. Only if MDBList returns no explicit field at all do
-    we trust the create response's id, because that endpoint creates a static
-    list by definition.
+    `/lists/user/add` creates a static list, so its returned normal `id` is safe
+    to use. If the response lacks an ID, briefly retry /lists/user and select a
+    reusable same-name record.
     """
-    value = explicit_static_id(result)
+    value = explicit_static_id(result) or metadata_id(result)
     if value is not None:
         return value
 
     for attempt in range(5):
         if attempt:
             time.sleep(0.5)
+        candidates = []
         for record in mdb.get_my_lists():
             if str(record.get("name", "")).lower() != name.lower():
                 continue
-            value = explicit_static_id(record)
+            value = static_write_id(record)
             if value is not None:
-                return value
-
-    # The create endpoint itself is specifically "Create Static List".
-    return metadata_id(result)
+                candidates.append((value, record))
+        if candidates:
+            return max(candidates, key=lambda pair: pair[0])[0]
+    return None
 
 
 def _identifier_set(items_response: dict | None) -> set[tuple[str, str]]:
@@ -140,9 +201,6 @@ def _patch_missing_item_diagnostics(sync) -> None:
             mdb.get_list_items = original_get_list_items
             mdb.add_items = original_add_items
 
-        # Only diagnose a failed sync after an actual add attempt. This avoids
-        # reporting every target as missing when the failure happened earlier,
-        # for example while clearing old items.
         if result is False and add_called and reads:
             present_ids = _identifier_set(reads[-1])
             missing_items = []
@@ -174,7 +232,7 @@ def _patch_missing_item_diagnostics(sync) -> None:
 
 
 def install(sync) -> None:
-    """Override broken static-list lookup/create path and add diagnostics."""
+    """Reuse existing static lists and create only when no matching list exists."""
 
     def find_or_create_static_list(mdb, name: str, slug: str):
         metadata = layout.LIST_METADATA.get(name.lower(), {})
@@ -186,18 +244,24 @@ def install(sync) -> None:
         }
 
         records = mdb.get_my_lists()
-        for record in _matching_record(records, name, slug, legacy_names):
-            list_name = str(record.get("name", ""))
-            static_id = explicit_static_id(record)
-            generic_id = metadata_id(record)
+        matches = list(_matching_record(records, name, slug, legacy_names))
+        reusable = [record for record in matches if static_write_id(record) is not None]
 
-            if static_id is None:
-                sync.logger.info(
-                    "  Ignoring matching non-static list: '%s' (metadata_id=%s)",
-                    list_name,
-                    generic_id,
+        if reusable:
+            # Bad earlier versions may already have created duplicates. Reuse a
+            # single deterministic list from now on and never create another.
+            record = max(reusable, key=lambda item: _match_priority(item, name, slug))
+            list_name = str(record.get("name", ""))
+            static_id = static_write_id(record)
+            generic_id = metadata_id(record) or static_id
+
+            if len(reusable) > 1:
+                sync.logger.warning(
+                    "  Found %d matching static lists for '%s'; reusing static_id=%s and creating no new list",
+                    len(reusable),
+                    name,
+                    static_id,
                 )
-                continue
 
             needs_update = (
                 list_name != name
@@ -208,43 +272,51 @@ def install(sync) -> None:
             )
 
             if needs_update and not sync.DRY_RUN:
-                # Metadata and static-item operations use different ids.
-                update_id = generic_id or static_id
                 payload = {"name": name}
                 if description:
                     payload["description"] = description
-                mdb._req("PUT", f"/lists/{update_id}", json=payload)
+                mdb._req("PUT", f"/lists/{generic_id}", json=payload)
                 sync.logger.info(
-                    "  Updated list metadata: '%s' -> '%s' "
-                    "(metadata_id=%s, static_id=%s)",
+                    "  Reusing existing static list after metadata update: '%s' -> '%s' (id=%s)",
                     list_name,
                     name,
-                    update_id,
                     static_id,
                 )
             elif needs_update:
                 sync.logger.info(
-                    "  [DRY RUN] Would update list metadata: '%s' -> '%s'",
+                    "  [DRY RUN] Would update metadata on existing static list: '%s' -> '%s' (id=%s)",
                     list_name,
                     name,
+                    static_id,
                 )
             else:
                 sync.logger.info(
-                    "  Static list exists: '%s' (metadata_id=%s, static_id=%s)",
+                    "  Reusing existing static list: '%s' (id=%s)",
                     list_name,
-                    generic_id,
                     static_id,
                 )
 
             return static_id
 
+        # A same-name/slug record exists but is explicitly dynamic or otherwise
+        # unusable. Do not create another same-named list. It is safer to fail
+        # this list's sync than to grow duplicates on every schedule run.
+        if matches:
+            sync.logger.error(
+                "  Matching MDBList list already exists for '%s' but is not usable as a static list; refusing to create a duplicate",
+                name,
+            )
+            return None
+
         if sync.DRY_RUN:
-            sync.logger.info("  [DRY RUN] Would create static list '%s'", name)
+            sync.logger.info("  [DRY RUN] Would create missing static list '%s'", name)
             if description:
                 sync.logger.info("  [DRY RUN] Description: %s", description)
             return None
 
-        sync.logger.info("  Creating static list '%s' ...", name)
+        # Creation is allowed only when no current-name, slug, or legacy-name
+        # record exists in /lists/user.
+        sync.logger.info("  No matching list exists; creating static list '%s' ...", name)
         payload = {"name": name}
         if description:
             payload["description"] = description
@@ -255,12 +327,12 @@ def install(sync) -> None:
             return None
 
         sync.logger.info(
-            "  Created static list '%s' (static_id=%s)", name, static_id
+            "  Created missing static list '%s' (id=%s)", name, static_id
         )
         return static_id
 
     sync.find_or_create_list = find_or_create_static_list
     _patch_missing_item_diagnostics(sync)
     sync.logger.info(
-        "mlo-Tek static-list ID fix enabled: metadata_id/static_id separated + missing-item diagnostics"
+        "mlo-Tek static-list reuse fix enabled: existing non-dynamic list IDs are reused; duplicate creation blocked"
     )
